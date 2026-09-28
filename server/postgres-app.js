@@ -36,6 +36,11 @@ async function initialize() {
 }
 app.use('/api', async (_req, _res, next) => { try { await initialize(); next(); } catch (error) { next(error); } });
 
+app.get('/api/health', async (_req, res) => {
+  const { rows } = await query('SELECT EXISTS(SELECT 1 FROM public.users WHERE role=$1 AND active=true) AS "adminReady"', ['admin']);
+  res.json({ ok: true, database: 'supabase', adminReady: rows[0].adminReady });
+});
+
 async function auth(req, res, next) {
   try {
     const token = cookies(req).mpchr;
@@ -101,6 +106,10 @@ app.post('/api/login', async (req, res) => {
   const attempts = (await query('SELECT count,reset_at FROM public.login_attempts WHERE key=$1', [key])).rows[0];
   if (attempts && Number(attempts.reset_at) > Date.now() && attempts.count >= 10) return res.status(429).json({ error: 'Олон удаа буруу оролдлоо. Түр хүлээнэ үү' });
   const user = (await query('SELECT * FROM public.users WHERE username=$1 AND active=true', [username])).rows[0];
+  if (!user) {
+    const { rows } = await query('SELECT EXISTS(SELECT 1 FROM public.users WHERE role=$1 AND active=true) AS ready', ['admin']);
+    if (!rows[0].ready) return res.status(503).json({ error: 'Анхны админ үүсээгүй байна. Vercel-д ADMIN_PASSWORD тохируулж дахин deploy хийнэ үү.' });
+  }
   if (!user || !verify(password, user.password)) {
     const count = attempts && Number(attempts.reset_at) > Date.now() ? attempts.count + 1 : 1;
     await query('INSERT INTO public.login_attempts(key,count,reset_at) VALUES($1,$2,$3) ON CONFLICT(key) DO UPDATE SET count=$2,reset_at=$3', [key, count, Date.now() + 15 * 60_000]);
