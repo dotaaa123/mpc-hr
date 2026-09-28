@@ -98,6 +98,17 @@ app.post('/api/login',(req,res) => {
 });
 app.post('/api/logout',auth,(req,res) => { db.prepare('DELETE FROM sessions WHERE token=?').run(cookie(req).mpchr); res.clearCookie('mpchr',{path:'/'}); res.json({ok:true}); });
 app.get('/api/me',auth,(req,res) => res.json({id:req.user.id,username:req.user.username,name:req.user.name,role:req.user.role,campId:req.user.campId}));
+app.patch('/api/me/password',auth,(req,res) => {
+  const currentPassword=String(req.body?.currentPassword || '');
+  const newPassword=String(req.body?.newPassword || '');
+  if (newPassword.length<8) return res.status(400).json({error:'Шинэ нууц үг 8-аас дээш тэмдэгттэй байна'});
+  const user=db.prepare('SELECT password FROM users WHERE id=?').get(req.user.id);
+  if (!user || !verify(currentPassword,user.password)) return res.status(400).json({error:'Одоогийн нууц үг буруу байна'});
+  if (currentPassword===newPassword) return res.status(400).json({error:'Шинэ нууц үг өмнөхөөс өөр байна'});
+  db.prepare('UPDATE users SET password=? WHERE id=?').run(hash(newPassword),req.user.id);
+  db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(req.user.id,cookie(req).mpchr);
+  res.json({ok:true});
+});
 app.get('/api/users',auth,admin,(_req,res) => res.json(db.prepare('SELECT id,username,name,role,camp_id AS campId,active FROM users ORDER BY id').all()));
 app.post('/api/users',auth,admin,(req,res) => {
   const {username,name,role,password,campId}=req.body;
@@ -114,6 +125,7 @@ app.patch('/api/users/:id',auth,admin,(req,res) => {
   if (role==='camp'&&!get('camps',campId)) return res.status(400).json({error:'Camp ахлахын camp-ийг сонгоно уу'});
   const active=req.body.active===undefined ? user.active : Number(Boolean(req.body.active));
   if (user.id===req.user.id && (!active || role!=='admin')) return res.status(400).json({error:'Өөрийн админ эрхийг хаах боломжгүй'});
+  if (user.id===req.user.id && req.body.password) return res.status(400).json({error:'Өөрийн нууц үгийг тусгай товчоор солино уу'});
   db.prepare('UPDATE users SET name=?,role=?,camp_id=?,active=?,password=? WHERE id=?').run(req.body.name || user.name,role,campId,active,req.body.password ? hash(req.body.password) : user.password,user.id);
   res.json({ok:true});
 });

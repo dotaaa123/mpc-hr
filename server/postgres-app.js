@@ -128,6 +128,19 @@ app.post('/api/logout', auth, async (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, username: req.user.username, name: req.user.name, role: req.user.role, campId: req.user.campId }));
+app.patch('/api/me/password', auth, async (req, res) => {
+  const currentPassword = String(req.body?.currentPassword || '');
+  const newPassword = String(req.body?.newPassword || '');
+  if (newPassword.length < 8) return res.status(400).json({ error: 'Шинэ нууц үг 8-аас дээш тэмдэгттэй байна' });
+  const user = (await query('SELECT password FROM public.users WHERE id=$1', [req.user.id])).rows[0];
+  if (!user || !verify(currentPassword, user.password)) return res.status(400).json({ error: 'Одоогийн нууц үг буруу байна' });
+  if (currentPassword === newPassword) return res.status(400).json({ error: 'Шинэ нууц үг өмнөхөөс өөр байна' });
+  await withTransaction(async db => {
+    await query('UPDATE public.users SET password=$1 WHERE id=$2', [hash(newPassword), req.user.id], db);
+    await query('DELETE FROM public.sessions WHERE user_id=$1 AND token<>$2', [req.user.id, cookies(req).mpchr], db);
+  });
+  res.json({ ok: true });
+});
 app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",active FROM public.users ORDER BY id')).rows));
 app.post('/api/users', auth, admin, async (req, res) => {
   const { username, name, role, password, campId } = req.body;
@@ -149,6 +162,7 @@ app.patch('/api/users/:id', auth, admin, async (req, res) => {
   if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
   const active = req.body.active === undefined ? user.active : Boolean(req.body.active);
   if (user.id === req.user.id && (!active || role !== 'admin')) return res.status(400).json({ error: 'Өөрийн админ эрхийг хаах боломжгүй' });
+  if (user.id === req.user.id && req.body.password) return res.status(400).json({ error: 'Өөрийн нууц үгийг тусгай товчоор солино уу' });
   await query('UPDATE public.users SET name=$1,role=$2,camp_id=$3,active=$4,password=$5 WHERE id=$6', [req.body.name || user.name, role, campId, active, req.body.password ? hash(req.body.password) : user.password, user.id]);
   res.json({ ok: true });
 });
