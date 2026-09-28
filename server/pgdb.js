@@ -6,7 +6,21 @@ let ready;
 
 export function getPool() {
   if (!process.env.POSTGRES_URL) throw new Error('Supabase POSTGRES_URL тохируулаагүй байна');
-  if (!pool) pool = new pg.Pool({ connectionString: process.env.POSTGRES_URL, max: 3, idleTimeoutMillis: 10000, connectionTimeoutMillis: 10000 });
+  if (!pool) {
+    const url = new URL(process.env.POSTGRES_URL);
+    const options = { max: 1, idleTimeoutMillis: 10000, connectionTimeoutMillis: 10000 };
+    if (url.hostname.endsWith('.supabase.com') || url.hostname.endsWith('.supabase.co')) {
+      if (process.env.SUPABASE_DB_CA) {
+        url.searchParams.delete('sslmode');
+        url.searchParams.delete('uselibpqcompat');
+        options.ssl = { ca: process.env.SUPABASE_DB_CA.replace(/\\n/g, '\n'), rejectUnauthorized: true };
+      } else {
+        url.searchParams.set('sslmode', 'require');
+        url.searchParams.set('uselibpqcompat', 'true');
+      }
+    }
+    pool = new pg.Pool({ connectionString: url.toString(), ...options });
+  }
   return pool;
 }
 

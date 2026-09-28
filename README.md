@@ -49,6 +49,8 @@ Vercel project-д Supabase integration холбоход `POSTGRES_URL` орчн�
 
 Vercel-ийн `/api/*` хүсэлт Supabase Postgres ашигладаг serverless API руу очно. Schema анхны хүсэлтээр үүснэ. Локал SQLite-ийн техник болон бусад өгөгдлийг Supabase руу нэг удаа шилжүүлэх бол Supabase-ийн Postgres connection URL болон өөрийн админ нууц үгийг зөвхөн локал terminal-ийн орчинд тохируулаад `npm run migrate:supabase` ажиллуулна. Скрипт хоосон сан шаарддаг; одоогийн session token-уудыг шилжүүлэхгүй.
 
+Supabase pooler холболт SSL шифрлэлт ашиглана. Серверийн certificate-ийг бүрэн баталгаажуулахын тулд Supabase Dashboard → Database Settings-ээс CA certificate татаж, PEM агуулгыг `SUPABASE_DB_CA` орчны хувьсагчид тохируулж болно.
+
 ## Лавлагаа
 
 - MPC Flutter төслийн техникийн үндсэн талбарууд: парк дугаар, төрөл, марк, загвар, VIN, улсын дугаар, байршил, эзэмшигч, мото цаг.
