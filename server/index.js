@@ -19,32 +19,7 @@ CREATE INDEX IF NOT EXISTS records_type ON records(type);
 CREATE TABLE IF NOT EXISTS submissions (id INTEGER PRIMARY KEY, assignment_id INTEGER NOT NULL, work_date TEXT NOT NULL, status TEXT NOT NULL, actual_hours REAL NOT NULL DEFAULT 0, actual_fuel REAL NOT NULL DEFAULT 0, actual_output REAL NOT NULL DEFAULT 0, note TEXT, submitted_by INTEGER NOT NULL, submitted_at TEXT NOT NULL, UNIQUE(assignment_id,work_date));`);
 if (!db.prepare('PRAGMA table_info(users)').all().some(row=>row.name==='camp_id')) db.exec('ALTER TABLE users ADD COLUMN camp_id INTEGER');
 
-const roles = ['admin', 'dispatcher', 'clerk', 'camp', 'hr'];
-const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'assignments', 'fuel', 'other', 'machineLogs'];
-const required = {
-  employees: ['lastName', 'firstName', 'register', 'position'],
-  attendance: ['date','employeeId','status'],
-  equipment: ['parkNo', 'kind', 'model'],
-  camps: ['name'],
-  warehouses: ['name'],
-  plans: ['name', 'startDate', 'endDate', 'targetOutput'],
-  assignments: ['date', 'title', 'shift'],
-  fuel: ['date', 'kind', 'liters'],
-  other: ['date', 'name', 'amount'],
-  machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours'],
-};
-const permitted = {
-  employees: ['lastName','firstName','register','phone','bankAccount','position','campId','shiftStart','shiftGroup','status','notes'],
-  attendance: ['date','employeeId','status','plannedHours','actualHours','campId','notes'],
-  equipment: ['parkNo','kind','brand','model','vin','plateNo','site','warehouseId','owner','currentHours','fuelRate','status','availability','year','sourceStatus','contractNo','contractCompany','unitPriceMnt','currency','warranty','certificate','customsDocument','passport','sourceSheet','sourceRow','sourceData','notes'],
-  camps: ['name','location','capacity','workType','manager','notes'],
-  warehouses: ['name','location','manager','notes'],
-  plans: ['name','startDate','endDate','site','warehouseId','targetOutput','outputUnit','unitRevenue','requiredEquipment','equipmentNeeds','requiredWorkers','plannedFuel','notes'],
-  assignments: ['date','title','site','shift','employeeId','equipmentId','planId','campId','plannedHours','plannedFuel','plannedOutput','notes'],
-  fuel: ['date','kind','equipmentId','liters','pricePerLiter','supplier','notes'],
-  other: ['date','name','category','amount','notes'],
-  machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours','startKm','endKm','startTime','endTime','stopMinutes','stopReason','operatorConfirmed','masterConfirmed','dispatcherChecked','fuelUsed','notes'],
-};
+import { roles, types, required, permitted } from './domain.js';
 const clean = (type, body) => Object.fromEntries(permitted[type].filter(key => body[key] !== undefined && body[key] !== null).map(key => [key, typeof body[key] === 'string' ? body[key].trim() : body[key]]));
 const all = type => db.prepare('SELECT id, body, created_at, updated_at FROM records WHERE type=? ORDER BY id DESC').all(type).map(r => ({ id:r.id, ...JSON.parse(r.body), createdAt:r.created_at, updatedAt:r.updated_at }));
 const get = (type,id) => all(type).find(r => r.id === Number(id));

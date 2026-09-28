@@ -8,13 +8,15 @@
     "client": "vite --host 127.0.0.1",
     "server": "node server/index.js",
     "build": "vite build",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "migrate:supabase": "node scripts/migrate-sqlite-to-supabase.js"
   },
   "dependencies": {
     "@ant-design/icons": "^6.0.0",
     "antd": "^6.0.0",
     "exceljs": "^4.4.0",
     "express": "^5.0.0",
+    "pg": "^8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "recharts": "^3.0.0"
