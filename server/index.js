@@ -4,6 +4,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { parseAllData } from './allData.js';
+import { buildPlanSchedule } from './planSchedule.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -48,6 +49,7 @@ function validate(type, body) {
   if (type==='employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';}
+  if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'));
   if (type==='assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type==='assignments' && value.employeeId && !get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
   if (type==='assignments' && value.equipmentId && !get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
@@ -75,6 +77,18 @@ function insert(type,value) {
   const result=db.prepare('INSERT INTO records(type,body,created_at,updated_at) VALUES(?,?,?,?)').run(type,JSON.stringify(value),now,now);
   if (type==='machineLogs') updateEquipmentHours(value);
   return get(type,result.lastInsertRowid);
+}
+function syncPlanAssignments(planId,plan) {
+  const assignments=all('assignments');
+  const previous=assignments.filter(row=>Number(row.autoPlanId)===Number(planId));
+  const next=buildPlanSchedule(plan,all('employees'),all('equipment'));
+  const other=assignments.filter(row=>Number(row.autoPlanId)!==Number(planId));
+  for(const row of next){const conflict=other.find(item=>item.date===row.date&&item.shift===row.shift&&(row.employeeId&&Number(item.employeeId)===Number(row.employeeId)||row.equipmentId&&Number(item.equipmentId)===Number(row.equipmentId)));if(conflict)throw new Error(`${row.date}-ны ээлжид сонгосон ажилтан эсвэл техник өөр ажилд оноогдсон байна`)}
+  if (previous.some(row=>db.prepare('SELECT id FROM submissions WHERE assignment_id=?').get(row.id))) throw new Error('Гүйцэтгэл илгээгдсэн төлөвлөгөөний хуваарийг өөрчлөх боломжгүй');
+  for (const row of previous) db.prepare('DELETE FROM records WHERE type=? AND id=?').run('assignments',row.id);
+  for (const row of next) {
+    insert('assignments',{...row,planId,autoPlanId:planId});
+  }
 }
 function updateEquipmentHours(log) {
   const equipment=get('equipment',log.equipmentId);
@@ -159,31 +173,45 @@ app.post('/api/attendance/submit',auth,(req,res) => {
     res.json({count:values.length});
   } catch(err) {res.status(400).json({error:err.message});}
 });
-app.get('/api/records/:type',auth,(req,res) => {
-  if (!types.includes(req.params.type)) return res.status(404).end();
-  const type=req.params.type;
-  if (type==='other' && req.user.role!=='admin') return res.json([]);
-  let rows=all(type);
-  if (req.user.role==='camp') {
-    const campId=Number(req.user.campId);
-    if (type==='employees') rows=rows.filter(row=>Number(row.campId)===campId);
-    if (type==='attendance') rows=rows.filter(row=>Number(get('employees',row.employeeId)?.campId)===campId);
-    if (type==='camps') rows=rows.filter(row=>row.id===campId);
-    if (type==='assignments') rows=rows.filter(row=>Number(row.campId)===campId||Number(get('employees',row.employeeId)?.campId)===campId);
+function visibleRecords(type,user,rows,employees) {
+  if(type==='other'&&user.role!=='admin')return [];
+  if(user.role==='camp'){
+    const campId=Number(user.campId);
+    if(type==='employees')rows=rows.filter(row=>Number(row.campId)===campId);
+    if(type==='attendance')rows=rows.filter(row=>Number(employees.find(e=>e.id===Number(row.employeeId))?.campId)===campId);
+    if(type==='camps')rows=rows.filter(row=>row.id===campId);
+    if(type==='assignments')rows=rows.filter(row=>Number(row.campId)===campId||Number(employees.find(e=>e.id===Number(row.employeeId))?.campId)===campId);
   }
-  if (req.user.role!=='admin') rows=rows.map(row=>{
+  if(user.role!=='admin')rows=rows.map(row=>{
     const safe={...row};
-    if (type==='employees' && req.user.role!=='hr') {delete safe.register;delete safe.phone;delete safe.bankAccount;}
-    if (type==='equipment') ['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key=>delete safe[key]);
-    if (type==='plans') delete safe.unitRevenue;
-    if (type==='fuel') delete safe.pricePerLiter;
+    if(type==='employees'&&user.role!=='hr'){delete safe.register;delete safe.phone;delete safe.bankAccount}
+    if(type==='equipment')['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key=>delete safe[key]);
+    if(type==='plans')delete safe.unitRevenue;
+    if(type==='fuel')delete safe.pricePerLiter;
     return safe;
   });
-  res.json(rows);
+  return rows;
+}
+function submissionsForUser(user,assignments,employees) {
+  let rows=db.prepare('SELECT s.*,u.name AS submittedByName FROM submissions s JOIN users u ON u.id=s.submitted_by ORDER BY s.submitted_at DESC').all();
+  if(user.role==='camp')rows=rows.filter(row=>{const task=assignments.find(a=>a.id===row.assignment_id);return task&&(Number(task.campId)===Number(user.campId)||Number(employees.find(e=>e.id===Number(task.employeeId))?.campId)===Number(user.campId))});
+  return rows;
+}
+app.get('/api/bootstrap',auth,(req,res)=>{
+  const employees=all('employees');
+  const assignments=all('assignments');
+  const records=Object.fromEntries(types.map(type=>[type,visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees)]));
+  const users=req.user.role==='admin'?db.prepare('SELECT id,username,name,role,camp_id AS campId,active FROM users ORDER BY id').all():[];
+  res.json({records,submissions:submissionsForUser(req.user,assignments,employees),users});
+});
+app.get('/api/records/:type',auth,(req,res)=>{
+  const type=req.params.type;
+  if(!types.includes(type))return res.status(404).end();
+  res.json(visibleRecords(type,req.user,all(type),all('employees')));
 });
 app.post('/api/records/:type',auth,editor,(req,res) => {
   const type=req.params.type; if (!types.includes(type)) return res.status(404).end();
-  try { const value=validate(type,req.body);if(!canEditRecord(req,type,value))return res.status(403).json({error:'Өөр camp-ийн ажилтны бүртгэл хийх эрхгүй'});res.json(insert(type,value)); } catch(err) { res.status(400).json({error:err.message}); }
+  try { const value=validate(type,req.body);if(!canEditRecord(req,type,value))return res.status(403).json({error:'Өөр camp-ийн ажилтны бүртгэл хийх эрхгүй'});if(type==='plans'){db.exec('BEGIN');try{const plan=insert(type,value);syncPlanAssignments(plan.id,value);db.exec('COMMIT');return res.json(plan)}catch(error){db.exec('ROLLBACK');throw error}}res.json(insert(type,value)); } catch(err) { res.status(400).json({error:err.message}); }
 });
 app.post('/api/import/:type',auth,editor,(req,res) => {
   const type=req.params.type; if (!types.includes(type)) return res.status(404).end();
@@ -192,7 +220,7 @@ app.post('/api/import/:type',auth,editor,(req,res) => {
   try {
     const values=rows.map((row,i) => { try { const value=validate(type,row);if(!canEditRecord(req,type,value))throw new Error('Өөр camp-ийн ажилтан');return value; } catch(err) { throw new Error(`${i+2}-р мөр: ${err.message}`); } });
     db.exec('BEGIN');
-    try { values.forEach(value => insert(type,value)); db.exec('COMMIT'); } catch(err) { db.exec('ROLLBACK'); throw err; }
+    try { values.forEach(value => {const record=insert(type,value);if(type==='plans')syncPlanAssignments(record.id,value)}); db.exec('COMMIT'); } catch(err) { db.exec('ROLLBACK'); throw err; }
     res.json({count:values.length});
   } catch(err) { res.status(400).json({error:err.message}); }
 });
@@ -227,17 +255,22 @@ app.post('/api/equipment-all-data/import',auth,admin,async(req,res) => {
 app.put('/api/records/:type/:id',auth,editor,(req,res) => {
   const {type,id}=req.params; if (!types.includes(type)) return res.status(404).end();
   if (!get(type,id)) return res.status(404).json({error:'Бүртгэл олдсонгүй'});
-  try { const value=validate(type,req.body);if(!canEditRecord(req,type,value)||!canEditRecord(req,type,get(type,id)))return res.status(403).json({error:'Өөр camp-ийн бүртгэл засах эрхгүй'});ensureUnique(type,value,id); db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id)); if(type==='machineLogs') updateEquipmentHours(value); res.json(get(type,id)); }
+  try { const value=validate(type,req.body);if(!canEditRecord(req,type,value)||!canEditRecord(req,type,get(type,id)))return res.status(403).json({error:'Өөр camp-ийн бүртгэл засах эрхгүй'});ensureUnique(type,value,id);if(type==='plans')db.exec('BEGIN');try{db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id));if(type==='plans'){syncPlanAssignments(id,value);db.exec('COMMIT')}if(type==='machineLogs') updateEquipmentHours(value);res.json(get(type,id))}catch(error){if(type==='plans')db.exec('ROLLBACK');throw error} }
   catch(err) { res.status(400).json({error:err.message}); }
 });
 app.delete('/api/records/:type/:id',auth,editor,(req,res) => {
   const {type,id}=req.params; if (!types.includes(type)) return res.status(404).end();
   if (!get(type,id)) return res.status(404).json({error:'Бүртгэл олдсонгүй'});
   if (!canEditRecord(req,type,get(type,id))) return res.status(403).json({error:'Өөр camp-ийн бүртгэл устгах эрхгүй'});
+  if (type==='plans') {
+    const linked=all('assignments').filter(row=>Number(row.planId)===Number(id));
+    if(linked.some(row=>Number(row.autoPlanId)!==Number(id)||db.prepare('SELECT id FROM submissions WHERE assignment_id=?').get(row.id)))return res.status(400).json({error:'Энэ төлөвлөгөөний ажил эсвэл гүйцэтгэлийн бүртгэл байна'});
+    db.exec('BEGIN');try{linked.forEach(row=>db.prepare('DELETE FROM records WHERE type=? AND id=?').run('assignments',row.id));db.prepare('DELETE FROM records WHERE type=? AND id=?').run(type,Number(id));db.exec('COMMIT');return res.json({ok:true})}catch(error){db.exec('ROLLBACK');return res.status(400).json({error:error.message})}
+  }
   if (type==='assignments') db.prepare('DELETE FROM submissions WHERE assignment_id=?').run(Number(id));
   db.prepare('DELETE FROM records WHERE type=? AND id=?').run(type,Number(id)); res.json({ok:true});
 });
-app.get('/api/submissions',auth,(req,res) => {let rows=db.prepare('SELECT s.*,u.name AS submittedByName FROM submissions s JOIN users u ON u.id=s.submitted_by ORDER BY s.submitted_at DESC').all();if(req.user.role==='camp')rows=rows.filter(row=>{const task=get('assignments',row.assignment_id);return task&&(Number(task.campId)===Number(req.user.campId)||Number(get('employees',task.employeeId)?.campId)===Number(req.user.campId))});res.json(rows)});
+app.get('/api/submissions',auth,(req,res)=>res.json(submissionsForUser(req.user,all('assignments'),all('employees'))));
 app.post('/api/submissions',auth,(req,res) => {
   const {assignmentId,status,actualHours,actualFuel,actualOutput,note}=req.body;
   const task=get('assignments',assignmentId);
@@ -250,6 +283,25 @@ app.post('/api/submissions',auth,(req,res) => {
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=excluded.status,actual_hours=excluded.actual_hours,actual_fuel=excluded.actual_fuel,actual_output=excluded.actual_output,note=excluded.note,submitted_by=excluded.submitted_by,submitted_at=excluded.submitted_at`)
     .run(task.id,task.date,status,...values,String(note || ''),req.user.id,new Date().toISOString());
   res.json({ok:true});
+});
+app.post('/api/submissions/batch',auth,(req,res) => {
+  if(!['admin','dispatcher','clerk','camp'].includes(req.user.role))return res.status(403).json({error:'Гүйцэтгэл илгээх эрхгүй'});
+  const rows=req.body?.rows;
+  if(!Array.isArray(rows)||!rows.length||rows.length>200)return res.status(400).json({error:'1–200 ажлын гүйцэтгэл сонгоно уу'});
+  try {
+    const values=rows.map(row=>{
+      const task=get('assignments',row.assignmentId);
+      if(!task)throw new Error('Ажлын хуваарь олдсонгүй');
+      if(req.user.role==='camp'&&Number(task.campId)!==Number(req.user.campId)&&Number(get('employees',task.employeeId)?.campId)!==Number(req.user.campId))throw new Error('Өөр camp-ийн ажил илгээх эрхгүй');
+      if(!['done','not_done'].includes(row.status))throw new Error('Ажил бүрт хийсэн эсэхийг сонгоно уу');
+      const numbers=[row.actualHours,row.actualFuel,row.actualOutput].map(value=>Number(value||0));
+      if(numbers.some(value=>!Number.isFinite(value)||value<0))throw new Error('Бодит утга 0-ээс бага байж болохгүй');
+      return {task,status:row.status,numbers,note:String(row.note||'')};
+    });
+    if(new Set(values.map(row=>row.task.id)).size!==values.length)throw new Error('Ажил давхар сонгогдсон байна');
+    db.exec('BEGIN');try{for(const row of values)db.prepare(`INSERT INTO submissions(assignment_id,work_date,status,actual_hours,actual_fuel,actual_output,note,submitted_by,submitted_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=excluded.status,actual_hours=excluded.actual_hours,actual_fuel=excluded.actual_fuel,actual_output=excluded.actual_output,note=excluded.note,submitted_by=excluded.submitted_by,submitted_at=excluded.submitted_at`).run(row.task.id,row.task.date,row.status,...row.numbers,row.note,req.user.id,new Date().toISOString());db.exec('COMMIT')}catch(error){db.exec('ROLLBACK');throw error}
+    res.json({count:values.length});
+  }catch(error){res.status(400).json({error:error.message})}
 });
 const dist=path.resolve('dist');
 app.use(express.static(dist));

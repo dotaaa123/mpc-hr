@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { parseAllData } from './allData.js';
+import { buildPlanSchedule } from './planSchedule.js';
 import { roles, types, required, permitted } from './domain.js';
 import { ensureSchema, getPool, withTransaction } from './pgdb.js';
 
@@ -38,7 +39,8 @@ app.use('/api', async (_req, _res, next) => { try { await initialize(); next(); 
 
 app.get('/api/health', async (_req, res) => {
   const { rows } = await query('SELECT EXISTS(SELECT 1 FROM public.users WHERE role=$1 AND active=true) AS "adminReady"', ['admin']);
-  res.json({ ok: true, database: 'supabase', adminReady: rows[0].adminReady });
+  const databaseRegion = new URL(process.env.POSTGRES_URL).hostname.match(/(?:ap|us|eu|sa|ca|me)-[a-z]+-\d/)?.[0] || null;
+  res.json({ ok: true, database: 'supabase', adminReady: rows[0].adminReady, functionRegion: process.env.VERCEL_REGION || null, databaseRegion });
 });
 
 async function auth(req, res, next) {
@@ -62,6 +64,7 @@ async function validate(type, body, db) {
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive'; }
+  if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db));
   if (type === 'assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type === 'assignments' && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
   if (type === 'assignments' && value.equipmentId && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
@@ -72,6 +75,7 @@ async function validate(type, body, db) {
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
+  if (!['employees','attendance','equipment'].includes(type)) return;
   const rows = await all(type, db);
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
@@ -96,6 +100,22 @@ async function insert(type, value, db) {
   const { rows } = await query('INSERT INTO public.records(type,body) VALUES($1,$2::jsonb) RETURNING id,body,created_at,updated_at', [type, JSON.stringify(value)], db);
   if (type === 'machineLogs') await updateEquipmentHours(value, db);
   return rowRecord(rows[0]);
+}
+async function syncPlanAssignments(planId, plan, db) {
+  const assignments = await all('assignments', db);
+  const previous = assignments.filter(row => Number(row.autoPlanId) === Number(planId));
+  const next = buildPlanSchedule(plan, await all('employees', db), await all('equipment', db));
+  const other = assignments.filter(row => Number(row.autoPlanId) !== Number(planId));
+  for (const row of next) {
+    const conflict = other.find(item => item.date === row.date && item.shift === row.shift && (row.employeeId && Number(item.employeeId) === Number(row.employeeId) || row.equipmentId && Number(item.equipmentId) === Number(row.equipmentId)));
+    if (conflict) throw new Error(`${row.date}-ны ээлжид сонгосон ажилтан эсвэл техник өөр ажилд оноогдсон байна`);
+  }
+  for (const row of previous) {
+    const used = await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [row.id], db);
+    if (used.rowCount) throw new Error('Гүйцэтгэл илгээгдсэн төлөвлөгөөний хуваарийг өөрчлөх боломжгүй');
+  }
+  for (const row of previous) await query('DELETE FROM public.records WHERE type=$1 AND id=$2', ['assignments', row.id], db);
+  for (const row of next) await insert('assignments', { ...row, planId, autoPlanId: planId }, db);
 }
 const bad = (res, error) => res.status(400).json({ error: error.message });
 
@@ -198,29 +218,50 @@ app.post('/api/attendance/submit', auth, async (req, res) => {
   } catch (error) { bad(res, error); }
 });
 
-app.get('/api/records/:type', auth, async (req, res) => {
-  const type = req.params.type;
-  if (!types.includes(type)) return res.status(404).end();
-  if (type === 'other' && req.user.role !== 'admin') return res.json([]);
-  let rows = await all(type);
-  if (req.user.role === 'camp') {
-    const campId = Number(req.user.campId);
-    if (type === 'employees') rows = rows.filter(row => Number(row.campId) === campId);
-    if (type === 'attendance' || type === 'assignments') {
-      const employeeCamp = new Map((await all('employees')).map(row => [row.id, Number(row.campId)]));
-      rows = rows.filter(row => type === 'attendance' ? employeeCamp.get(Number(row.employeeId)) === campId : Number(row.campId) === campId || employeeCamp.get(Number(row.employeeId)) === campId);
-    }
-    if (type === 'camps') rows = rows.filter(row => row.id === campId);
+function visibleRecords(type,user,rows,employees) {
+  if(type==='other'&&user.role!=='admin')return [];
+  if(user.role==='camp'){
+    const campId=Number(user.campId);
+    const employeeCamp=new Map(employees.map(row=>[row.id,Number(row.campId)]));
+    if(type==='employees')rows=rows.filter(row=>Number(row.campId)===campId);
+    if(type==='attendance')rows=rows.filter(row=>employeeCamp.get(Number(row.employeeId))===campId);
+    if(type==='assignments')rows=rows.filter(row=>Number(row.campId)===campId||employeeCamp.get(Number(row.employeeId))===campId);
+    if(type==='camps')rows=rows.filter(row=>row.id===campId);
   }
-  if (req.user.role !== 'admin') rows = rows.map(row => {
-    const safe = { ...row };
-    if (type === 'employees' && req.user.role !== 'hr') { delete safe.register; delete safe.phone; delete safe.bankAccount; }
-    if (type === 'equipment') ['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key => delete safe[key]);
-    if (type === 'plans') delete safe.unitRevenue;
-    if (type === 'fuel') delete safe.pricePerLiter;
+  if(user.role!=='admin')rows=rows.map(row=>{
+    const safe={...row};
+    if(type==='employees'&&user.role!=='hr'){delete safe.register;delete safe.phone;delete safe.bankAccount}
+    if(type==='equipment')['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key=>delete safe[key]);
+    if(type==='plans')delete safe.unitRevenue;
+    if(type==='fuel')delete safe.pricePerLiter;
     return safe;
   });
-  res.json(rows);
+  return rows;
+}
+const submissionSql='SELECT s.id,s.assignment_id,s.work_date::text AS work_date,s.status,s.actual_hours::float8 AS actual_hours,s.actual_fuel::float8 AS actual_fuel,s.actual_output::float8 AS actual_output,s.note,s.submitted_by,s.submitted_at,u.name AS "submittedByName" FROM public.submissions s JOIN public.users u ON u.id=s.submitted_by ORDER BY s.submitted_at DESC';
+function visibleSubmissions(rows,user,assignments,employees){
+  if(user.role!=='camp')return rows;
+  const assignmentMap=new Map(assignments.map(row=>[row.id,row]));
+  const employeeCamp=new Map(employees.map(row=>[row.id,Number(row.campId)]));
+  return rows.filter(row=>{const task=assignmentMap.get(row.assignment_id);return task&&(Number(task.campId)===Number(user.campId)||employeeCamp.get(Number(task.employeeId))===Number(user.campId))});
+}
+app.get('/api/bootstrap',auth,async(req,res)=>{
+  const [recordResult,submissionResult,userResult]=await Promise.all([
+    query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) ORDER BY id DESC',[types]),
+    query(submissionSql),
+    req.user.role==='admin'?query('SELECT id,username,name,role,camp_id AS "campId",active FROM public.users ORDER BY id'):Promise.resolve({rows:[]})
+  ]);
+  const grouped=Object.fromEntries(types.map(type=>[type,[]]));
+  for(const row of recordResult.rows)grouped[row.type].push(rowRecord(row));
+  const employees=grouped.employees,assignments=grouped.assignments;
+  const records=Object.fromEntries(types.map(type=>[type,visibleRecords(type,req.user,grouped[type],employees)]));
+  res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows});
+});
+app.get('/api/records/:type',auth,async(req,res)=>{
+  const type=req.params.type;
+  if(!types.includes(type))return res.status(404).end();
+  const rows=await all(type);
+  res.json(visibleRecords(type,req.user,rows,req.user.role==='camp'&&['attendance','assignments'].includes(type)?await all('employees'):[]));
 });
 app.post('/api/records/:type', auth, editor, async (req, res) => {
   const type = req.params.type;
@@ -228,6 +269,10 @@ app.post('/api/records/:type', auth, editor, async (req, res) => {
   try {
     const value = await validate(type, req.body);
     if (!await canEditRecord(req, type, value)) return res.status(403).json({ error: 'Өөр camp-ийн ажилтны бүртгэл хийх эрхгүй' });
+    if (type === 'plans') {
+      const plan = await withTransaction(async db => { const created = await insert(type, value, db); await syncPlanAssignments(created.id, value, db); return created; });
+      return res.json(plan);
+    }
     res.json(await insert(type, value));
   } catch (error) { bad(res, error); }
 });
@@ -240,7 +285,11 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
     const value = await validate(type, req.body);
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
-    await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3', [JSON.stringify(value), type, Number(id)]);
+    if (type === 'plans') await withTransaction(async db => {
+      await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3', [JSON.stringify(value), type, Number(id)], db);
+      await syncPlanAssignments(id, value, db);
+    });
+    else await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3', [JSON.stringify(value), type, Number(id)]);
     if (type === 'machineLogs') await updateEquipmentHours(value);
     res.json(await get(type, id));
   } catch (error) { bad(res, error); }
@@ -251,10 +300,20 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
   const old = await get(type, id);
   if (!old) return res.status(404).json({ error: 'Бүртгэл олдсонгүй' });
   if (!await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл устгах эрхгүй' });
-  await withTransaction(async db => {
-    await query('DELETE FROM public.records WHERE type=$1 AND id=$2', [type, Number(id)], db);
-  });
-  res.json({ ok: true });
+  try {
+    await withTransaction(async db => {
+      if (type === 'plans') {
+        const linked = (await all('assignments', db)).filter(row => Number(row.planId) === Number(id));
+        for (const row of linked) {
+          const used = await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [row.id], db);
+          if (Number(row.autoPlanId) !== Number(id) || used.rowCount) throw new Error('Энэ төлөвлөгөөний ажил эсвэл гүйцэтгэлийн бүртгэл байна');
+          await query('DELETE FROM public.records WHERE type=$1 AND id=$2', ['assignments', row.id], db);
+        }
+      }
+      await query('DELETE FROM public.records WHERE type=$1 AND id=$2', [type, Number(id)], db);
+    });
+    res.json({ ok: true });
+  } catch (error) { bad(res, error); }
 });
 
 app.post('/api/import/:type', auth, editor, async (req, res) => {
@@ -268,7 +327,8 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
         try {
           const value = await validate(type, row, db);
           if (!await canEditRecord(req, type, value, db)) throw new Error('Өөр camp-ийн ажилтан');
-          await insert(type, value, db);
+          const record = await insert(type, value, db);
+          if (type === 'plans') await syncPlanAssignments(record.id, value, db);
         } catch (error) { throw new Error(`${index + 2}-р мөр: ${error.message}`); }
       }
     });
@@ -305,17 +365,10 @@ app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
   } catch (error) { bad(res, error); }
 });
 
-app.get('/api/submissions', auth, async (req, res) => {
-  let rows = (await query('SELECT s.id,s.assignment_id,s.work_date::text AS work_date,s.status,s.actual_hours::float8 AS actual_hours,s.actual_fuel::float8 AS actual_fuel,s.actual_output::float8 AS actual_output,s.note,s.submitted_by,s.submitted_at,u.name AS "submittedByName" FROM public.submissions s JOIN public.users u ON u.id=s.submitted_by ORDER BY s.submitted_at DESC')).rows;
-  if (req.user.role === 'camp') {
-    const assignments = new Map((await all('assignments')).map(row => [row.id, row]));
-    const employees = new Map((await all('employees')).map(row => [row.id, row]));
-    rows = rows.filter(row => {
-      const task = assignments.get(row.assignment_id);
-      return task && (Number(task.campId) === Number(req.user.campId) || Number(employees.get(Number(task.employeeId))?.campId) === Number(req.user.campId));
-    });
-  }
-  res.json(rows);
+app.get('/api/submissions',auth,async(req,res)=>{
+  const rows=(await query(submissionSql)).rows;
+  if(req.user.role!=='camp')return res.json(rows);
+  res.json(visibleSubmissions(rows,req.user,await all('assignments'),await all('employees')));
 });
 app.post('/api/submissions', auth, async (req, res) => {
   const { assignmentId, status, actualHours, actualFuel, actualOutput, note } = req.body;
@@ -330,6 +383,31 @@ app.post('/api/submissions', auth, async (req, res) => {
     ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=EXCLUDED.status,actual_hours=EXCLUDED.actual_hours,actual_fuel=EXCLUDED.actual_fuel,actual_output=EXCLUDED.actual_output,note=EXCLUDED.note,submitted_by=EXCLUDED.submitted_by,submitted_at=now()`,
   [task.id, task.date, status, ...values, String(note || ''), req.user.id]);
   res.json({ ok: true });
+});
+app.post('/api/submissions/batch', auth, async (req, res) => {
+  if (!['admin','dispatcher','clerk','camp'].includes(req.user.role)) return res.status(403).json({ error: 'Гүйцэтгэл илгээх эрхгүй' });
+  const rows = req.body?.rows;
+  if (!Array.isArray(rows) || !rows.length || rows.length > 200) return res.status(400).json({ error: '1–200 ажлын гүйцэтгэл сонгоно уу' });
+  try {
+    await withTransaction(async db => {
+      const seen = new Set();
+      for (const row of rows) {
+        const task = await get('assignments', row.assignmentId, db);
+        if (!task) throw new Error('Ажлын хуваарь олдсонгүй');
+        if (seen.has(task.id)) throw new Error('Ажил давхар сонгогдсон байна');
+        seen.add(task.id);
+        if (req.user.role === 'camp' && Number(task.campId) !== Number(req.user.campId) && Number((await get('employees', task.employeeId, db))?.campId) !== Number(req.user.campId)) throw new Error('Өөр camp-ийн ажил илгээх эрхгүй');
+        if (!['done','not_done'].includes(row.status)) throw new Error('Ажил бүрт хийсэн эсэхийг сонгоно уу');
+        const numbers = [row.actualHours,row.actualFuel,row.actualOutput].map(value => Number(value || 0));
+        if (numbers.some(value => !Number.isFinite(value) || value < 0)) throw new Error('Бодит утга 0-ээс бага байж болохгүй');
+        await query(`INSERT INTO public.submissions(assignment_id,work_date,status,actual_hours,actual_fuel,actual_output,note,submitted_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+          ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=EXCLUDED.status,actual_hours=EXCLUDED.actual_hours,actual_fuel=EXCLUDED.actual_fuel,actual_output=EXCLUDED.actual_output,note=EXCLUDED.note,submitted_by=EXCLUDED.submitted_by,submitted_at=now()`,
+        [task.id,task.date,row.status,...numbers,String(row.note || ''),req.user.id],db);
+      }
+    });
+    res.json({ count: rows.length });
+  } catch (error) { bad(res, error); }
 });
 
 app.use((error, _req, res, _next) => {
