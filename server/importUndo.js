@@ -1,5 +1,5 @@
 const references = {
-  employees: ['employeeId','originalEmployeeId','replacementEmployeeId','employeeIds'],
+  employees: ['employeeId','originalEmployeeId','replacementEmployeeId','employeeIds','operatorAId','operatorBId','operatorCId','operatorDId'],
   equipment: ['equipmentId','equipmentIds'],
   camps: ['campId'],
   warehouses: ['warehouseId'],
