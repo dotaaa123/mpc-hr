@@ -280,7 +280,7 @@ app.get('/api/audit', auth, admin, async (req, res) => {
 });
 app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
 const documentEditor = async (req,res,next) => {try{const action=req.method==='GET'?'read':req.method==='DELETE'?'delete':'create';return await allowed(req,'documents',action)?next():res.status(403).json({error:'HR баримтын энэ үйлдэлд эрхгүй'})}catch(error){next(error)}};
-const documentFields = ['date','companyName','companyAddress','orderNumber','city','legalBasis','effectiveDate','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','payCondition','purpose'];
+const documentFields = ['date','companyName','companyAddress','orderNumber','city','legalBasis','effectiveDate','trialMonths','salaryAmount','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','approvalDecision','payMode','payCondition','purpose'];
 app.get('/api/documents',auth,documentEditor,async (_req,res)=>{
   const {rows}=await query('SELECT id,employee_id AS "employeeId",kind,fields,approvers,created_at AS "createdAt" FROM public.documents WHERE project_id=$1 ORDER BY id DESC LIMIT 200',[currentProject()]);
   res.json(rows);
@@ -291,6 +291,9 @@ app.post('/api/documents',auth,documentEditor,async (req,res)=>{
     const kind=String(req.body?.kind||'');
     if(!employee||!documentKinds[kind])return res.status(400).json({error:'Ажилтан эсвэл баримтын төрөл буруу байна'});
     const fields=Object.fromEntries(documentFields.map(key=>[key,String(req.body?.fields?.[key]??'').trim().slice(0,500)]).filter(([,value])=>value));
+    if(fields.trialMonths&&(!/^\d+$/.test(fields.trialMonths)||Number(fields.trialMonths)>12))return res.status(400).json({error:'Туршилтын хугацаа 0–12 сар байна'});
+    if(fields.salaryAmount&&(!/^\d+(\.\d{1,2})?$/.test(fields.salaryAmount)||Number(fields.salaryAmount)<=0))return res.status(400).json({error:'Үндсэн цалингийн дүн буруу байна'});
+    if(fields.approvalDecision&&!['approved','rejected'].includes(fields.approvalDecision)||fields.payMode&&!['paid_1_5','unpaid'].includes(fields.payMode))return res.status(400).json({error:'Сунаж ажиллах хуудасны сонголт буруу байна'});
     const ids=Array.isArray(req.body?.approverIds)?req.body.approverIds.slice(0,8):[];
     const approvers=[];
     for(const id of ids){const person=await get('employees',id);if(!person)return res.status(400).json({error:'Батлах ажилтан энэ төсөлд байхгүй'});approvers.push({employeeId:person.id,position:person.position||'',name:`${person.lastName||''} ${person.firstName||''}`.trim()})}
