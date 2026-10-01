@@ -7,7 +7,8 @@ const dayNumber = value => {
 export function rosterState(employee, date, attendance = [], overrides = []) {
   const employeeId = Number(employee?.id);
   if (!employee || !employeeId) return { code:'unknown', label:'Ажилтан тодорхойгүй', available:false };
-  if (employee.terminationDate && employee.terminationDate <= date || employee.status === 'inactive')
+  if (employee.hireDate && date < employee.hireDate) return { code:'inactive', label:'Ажилд ороогүй', available:false };
+  if (employee.terminationDate && date > employee.terminationDate || employee.status === 'inactive')
     return { code:'inactive', label:'Ажлаас гарсан / идэвхгүй', available:false };
 
   const replacement = overrides.find(row => row.date === date && Number(row.replacementEmployeeId) === employeeId);
