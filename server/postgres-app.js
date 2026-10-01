@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule } from './planSchedule.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
+import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
 import { ensureSchema, getPool, withTransaction } from './pgdb.js';
 
@@ -67,8 +68,9 @@ const defaultPermissions = {
   dispatcher: { assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
   clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'],machineLogs:['read','create','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
-  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
+  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
 };
+const permissionPages=[...types,'documents'];
 async function allowed(req, page, action) {
   if (req.user.role === 'admin') return true;
   const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role]);
@@ -82,6 +84,7 @@ const editor = async (req, res, next) => {
 async function audit(req, page, action, recordId, details = {}, db) {
   await query('INSERT INTO public.audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [currentProject(), req.user.id, req.user.username, req.user.role, page, action, recordId || null, JSON.stringify(details)], db);
 }
+const changesBetween=(before,after)=>Object.fromEntries(Object.keys(after).filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,{before:before[key]??null,after:after[key]??null}]));
 app.use('/api', (req, res, next) => {
   if (['/login','/health'].includes(req.path)) return next();
   auth(req, res, async () => {
@@ -262,7 +265,7 @@ app.put('/api/permissions/:role', auth, admin, async (req, res) => {
   const input = req.body?.permissions;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return res.status(400).json({ error: 'Эрхийн тохиргоо буруу байна' });
   const actions = ['read','create','update','delete'];
-  const permissions = Object.fromEntries(Object.entries(input).filter(([page]) => types.includes(page)).map(([page, list]) => [page, Array.isArray(list) ? list.filter(action => actions.includes(action)) : []]));
+  const permissions = Object.fromEntries(Object.entries(input).filter(([page]) => permissionPages.includes(page)).map(([page, list]) => [page, Array.isArray(list) ? list.filter(action => actions.includes(action)) : []]));
   await query('INSERT INTO public.role_permissions(project_id,role,permissions) VALUES($1,$2,$3::jsonb) ON CONFLICT(project_id,role) DO UPDATE SET permissions=$3::jsonb,updated_at=now()', [currentProject(), role, JSON.stringify(permissions)]);
   await audit(req, 'permissions', 'update', null, { role, permissions });
   res.json({ role, permissions });
@@ -274,7 +277,7 @@ app.get('/api/audit', auth, admin, async (req, res) => {
   res.json(rows);
 });
 app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
-const documentEditor = (req,res,next) => ['admin','hr'].includes(req.user.role) ? next() : res.status(403).json({error:'HR баримт үүсгэх эрхгүй'});
+const documentEditor = async (req,res,next) => {try{const action=req.method==='GET'?'read':req.method==='DELETE'?'delete':'create';return await allowed(req,'documents',action)?next():res.status(403).json({error:'HR баримтын энэ үйлдэлд эрхгүй'})}catch(error){next(error)}};
 const documentFields = ['date','companyName','companyAddress','orderNumber','city','legalBasis','effectiveDate','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','payCondition','purpose'];
 app.get('/api/documents',auth,documentEditor,async (_req,res)=>{
   const {rows}=await query('SELECT id,employee_id AS "employeeId",kind,fields,approvers,created_at AS "createdAt" FROM public.documents WHERE project_id=$1 ORDER BY id DESC LIMIT 200',[currentProject()]);
@@ -454,17 +457,17 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
     if (type === 'shiftOverrides') {
-      await withTransaction(async db => {await undoShiftOverride(id,db);await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),type,Number(id),currentProject()],db);const changed=await applyShiftOverride(id,value,db);await audit(req,type,'update',Number(id),{changedAssignments:changed},db)});
+      await withTransaction(async db => {await undoShiftOverride(id,db);await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),type,Number(id),currentProject()],db);const changed=await applyShiftOverride(id,value,db);await audit(req,type,'update',Number(id),{changedAssignments:changed,changes:changesBetween(old,value)},db)});
       return res.json(await get(type,id));
     }
     if (type === 'plans') await withTransaction(async db => {
       await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4', [JSON.stringify(value), type, Number(id), currentProject()], db);
       await syncPlanAssignments(id, value, db);
-      await audit(req,type,'update',Number(id),{ changedFields:Object.keys(value).filter(key=>JSON.stringify(value[key])!==JSON.stringify(old[key])) },db);
+      await audit(req,type,'update',Number(id),{ changes:changesBetween(old,value) },db);
     });
     else {
       await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4', [JSON.stringify(value), type, Number(id), currentProject()]);
-      await audit(req,type,'update',Number(id),{ changedFields:Object.keys(value).filter(key=>JSON.stringify(value[key])!==JSON.stringify(old[key])) });
+      await audit(req,type,'update',Number(id),{ changes:changesBetween(old,value) });
     }
     if (type === 'machineLogs') await updateEquipmentHours(value);
     res.json(await get(type, id));
@@ -502,6 +505,8 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
   try {
     let batchId;
     await withTransaction(async db => {
+      const machineIds=type==='machineLogs'?[...new Set(rows.map(row=>Number(row.equipmentId)).filter(Boolean))]:[];
+      const beforeHours=Object.fromEntries(await Promise.all(machineIds.map(async id=>[id,Number((await get('equipment',id,db))?.currentHours||0)])));
       const batch = await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),type,String(req.body.filename || '').slice(0,200),rows.length,req.user.id],db);
       batchId = batch.rows[0].id;
       for (const [index, row] of rows.entries()) {
@@ -510,7 +515,12 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
           if (!await canEditRecord(req, type, value, db)) throw new Error('Өөр camp-ийн ажилтан');
           const record = await insert(type, value, db, batchId);
           if (type === 'plans') await syncPlanAssignments(record.id, value, db);
+          if (type === 'shiftOverrides') await applyShiftOverride(record.id,value,db);
         } catch (error) { throw new Error(`${index + 2}-р мөр: ${error.message}`); }
+      }
+      if(type==='machineLogs'){
+        const afterHours=Object.fromEntries(await Promise.all(machineIds.map(async id=>[id,Number((await get('equipment',id,db))?.currentHours||0)])));
+        await query('UPDATE public.import_batches SET undo_snapshot=$1::jsonb WHERE id=$2',[JSON.stringify({beforeHours,afterHours}),batchId],db);
       }
       await audit(req,type,'import',null,{ batchId, count:rows.length, filename:String(req.body.filename || '').slice(0,200) },db);
     });
@@ -521,11 +531,22 @@ app.post('/api/imports/:id/undo', auth, admin, async (req, res) => {
   try {
     const batch = (await query('SELECT * FROM public.import_batches WHERE id=$1 AND project_id=$2 AND undone_at IS NULL', [Number(req.params.id), currentProject()])).rows[0];
     if (!batch) return res.status(404).json({ error: 'Импорт олдсонгүй эсвэл буцаагдсан байна' });
-    if (batch.type !== 'employees' && batch.type !== 'equipment') throw new Error('Энэ төрлийн импортыг автоматаар буцаах боломжгүй');
     const count = await withTransaction(async db => {
-      const linked = await query(`SELECT count(*)::int AS count FROM public.records r JOIN public.records e ON e.import_batch_id=$1 AND e.project_id=$2 WHERE r.project_id=$2 AND (r.body->>'employeeId'=e.id::text OR r.body->>'equipmentId'=e.id::text)`, [batch.id,currentProject()],db);
-      if (linked.rows[0].count) throw new Error('Импортолсон мөрүүдийг бусад бүртгэл ашиглаж байгаа тул буцаах боломжгүй');
+      const snapshot=batch.undo_snapshot||{};
+      if(batch.type==='machineLogs'){
+        if(!snapshot.beforeHours||!snapshot.afterHours)throw new Error('Хуучин мото цагийн импортын суурь заалт хадгалагдаагүй тул автоматаар буцаах боломжгүй');
+        for(const [id,hours] of Object.entries(snapshot.afterHours)){const machine=await get('equipment',id,db);if(!machine||Number(machine.currentHours||0)!==Number(hours))throw new Error('Импортын дараа техникийн мото цаг өөрчлөгдсөн тул буцаах боломжгүй')}
+      }
+      const records=(await query('SELECT id,type,body,import_batch_id AS "importBatchId",created_at AS "createdAt",updated_at AS "updatedAt" FROM public.records WHERE project_id=$1',[currentProject()],db)).rows;
+      const plan=importUndoPlan(batch.type,batch.id,records);
+      const taskIds=[...plan.imported,...plan.generated].filter(row=>row.type==='assignments').map(row=>row.id);
+      if(taskIds.length&&(await query('SELECT id FROM public.submissions WHERE assignment_id=ANY($1::int[]) LIMIT 1',[taskIds],db)).rowCount)throw new Error('Илгээсэн ажлын гүйцэтгэлтэй импорт буцаах боломжгүй');
+      if(batch.type==='employees'&&plan.imported.length){const ids=plan.imported.map(row=>row.id);if((await query('SELECT id FROM public.users WHERE employee_id=ANY($1::int[]) LIMIT 1',[ids],db)).rowCount||(await query('SELECT id FROM public.documents WHERE employee_id=ANY($1::int[]) LIMIT 1',[ids],db)).rowCount)throw new Error('Импортолсон ажилтанд хэрэглэгч эсвэл баримт үүссэн тул буцаах боломжгүй')}
+      if(batch.type==='camps'&&plan.imported.length&&(await query('SELECT id FROM public.users WHERE camp_id=ANY($1::int[]) LIMIT 1',[plan.imported.map(row=>row.id)],db)).rowCount)throw new Error('Импортолсон camp-д хэрэглэгч оноосон тул буцаах боломжгүй');
+      if(batch.type==='shiftOverrides')for(const row of plan.imported)await undoShiftOverride(row.id,db);
+      if(plan.generated.length)await query('DELETE FROM public.records WHERE id=ANY($1::int[]) AND project_id=$2',[plan.generated.map(row=>row.id),currentProject()],db);
       const deleted = await query('DELETE FROM public.records WHERE import_batch_id=$1 AND project_id=$2 RETURNING id', [batch.id,currentProject()],db);
+      if(batch.type==='machineLogs')for(const [id,hours] of Object.entries(snapshot.beforeHours)){const machine=await get('equipment',id,db);const remaining=(await all('machineLogs',db)).filter(row=>Number(row.equipmentId)===Number(id));const nextHours=Math.max(Number(hours),...remaining.map(row=>Number(row.endHours||0)));const {id:recordId,createdAt,updatedAt,...body}=machine;body.currentHours=nextHours;await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3',[JSON.stringify(body),recordId,currentProject()],db)}
       await query('UPDATE public.import_batches SET undone_at=now() WHERE id=$1', [batch.id],db);
       await audit(req,batch.type,'import_undo',null,{batchId:batch.id,count:deleted.rowCount},db);
       return deleted.rowCount;
