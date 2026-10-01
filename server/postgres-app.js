@@ -3,6 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule } from './planSchedule.js';
+import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { roles, types, required, permitted } from './domain.js';
 import { ensureSchema, getPool, withTransaction } from './pgdb.js';
 
@@ -98,6 +99,7 @@ async function validate(type, body, db) {
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
+  if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive'; }
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db));
   if (type === 'assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
@@ -156,11 +158,42 @@ async function syncPlanAssignments(planId, plan, db) {
     if (conflict) throw new Error(`${row.date}-ны ээлжид сонгосон ажилтан эсвэл техник өөр ажилд оноогдсон байна`);
   }
   for (const row of previous) {
+    if (row.shiftOverrideId) throw new Error('Ээлж солигдсон төлөвлөгөөг эхлээд ээлжийн өөрчлөлтөөс чөлөөлнө үү');
     const used = await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [row.id], db);
     if (used.rowCount) throw new Error('Гүйцэтгэл илгээгдсэн төлөвлөгөөний хуваарийг өөрчлөх боломжгүй');
   }
   for (const row of previous) await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', ['assignments', row.id, currentProject()], db);
   for (const row of next) await insert('assignments', { ...row, planId, autoPlanId: planId }, db);
+}
+async function applyShiftOverride(overrideId, value, db) {
+  const replacement = await get('employees', value.replacementEmployeeId, db);
+  if (!replacement) throw new Error('Орлон ажиллах ажилтан олдсонгүй');
+  const attendance = await all('attendance', db);
+  if (value.originalEmployeeId && attendance.some(row => row.date === value.date && Number(row.employeeId) === Number(value.originalEmployeeId) && ['day','night'].includes(row.status))) throw new Error('Солигдох ажилтны ирцийг эхлээд ажиллаагүй/чөлөөтэй болгож засна уу');
+  const assignments = await all('assignments', db);
+  const targets = assignments.filter(row => row.date === value.date && Number(row.employeeId) === Number(value.originalEmployeeId) && (!value.shift || row.shift === value.shift));
+  for (const target of targets) {
+    if (assignments.some(row => row.id !== target.id && row.date === target.date && row.shift === target.shift && Number(row.employeeId) === Number(replacement.id))) throw new Error('Орлон ажиллах ажилтан тухайн ээлжид өөр ажилд оноогдсон байна');
+    if ((await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [target.id], db)).rowCount) throw new Error('Гүйцэтгэл илгээгдсэн ажлын ээлжийг солих боломжгүй');
+    const { id,createdAt,updatedAt,...body } = target;
+    body.originalEmployeeId = Number(value.originalEmployeeId);
+    body.employeeId = replacement.id;
+    body.campId = replacement.campId || body.campId;
+    body.shiftOverrideId = Number(overrideId);
+    await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify(body),target.id,currentProject()],db);
+  }
+  return targets.length;
+}
+async function undoShiftOverride(overrideId, db) {
+  const assignments = (await all('assignments', db)).filter(row => Number(row.shiftOverrideId) === Number(overrideId));
+  for (const target of assignments) {
+    if ((await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [target.id], db)).rowCount) throw new Error('Гүйцэтгэл илгээгдсэн ээлжийн өөрчлөлтийг буцаах боломжгүй');
+    const original = await get('employees', target.originalEmployeeId, db);
+    const { id,createdAt,updatedAt,originalEmployeeId,shiftOverrideId,...body } = target;
+    body.employeeId = originalEmployeeId;
+    body.campId = original?.campId || body.campId;
+    await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify(body),target.id,currentProject()],db);
+  }
 }
 const bad = (res, error) => res.status(400).json({ error: error.message });
 
@@ -241,7 +274,39 @@ app.get('/api/audit', auth, admin, async (req, res) => {
   res.json(rows);
 });
 app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
-app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users ORDER BY id')).rows));
+const documentEditor = (req,res,next) => ['admin','hr'].includes(req.user.role) ? next() : res.status(403).json({error:'HR баримт үүсгэх эрхгүй'});
+const documentFields = ['date','companyName','companyAddress','orderNumber','city','legalBasis','effectiveDate','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','payCondition','purpose'];
+app.get('/api/documents',auth,documentEditor,async (_req,res)=>{
+  const {rows}=await query('SELECT id,employee_id AS "employeeId",kind,fields,approvers,created_at AS "createdAt" FROM public.documents WHERE project_id=$1 ORDER BY id DESC LIMIT 200',[currentProject()]);
+  res.json(rows);
+});
+app.post('/api/documents',auth,documentEditor,async (req,res)=>{
+  try {
+    const employee=await get('employees',req.body?.employeeId);
+    const kind=String(req.body?.kind||'');
+    if(!employee||!documentKinds[kind])return res.status(400).json({error:'Ажилтан эсвэл баримтын төрөл буруу байна'});
+    const fields=Object.fromEntries(documentFields.map(key=>[key,String(req.body?.fields?.[key]??'').trim().slice(0,500)]).filter(([,value])=>value));
+    const ids=Array.isArray(req.body?.approverIds)?req.body.approverIds.slice(0,8):[];
+    const approvers=[];
+    for(const id of ids){const person=await get('employees',id);if(!person)return res.status(400).json({error:'Батлах ажилтан энэ төсөлд байхгүй'});approvers.push({employeeId:person.id,position:person.position||'',name:`${person.lastName||''} ${person.firstName||''}`.trim()})}
+    if(kind==='termination'&&!fields.legalBasis)return res.status(400).json({error:'Ажлаас чөлөөлөх тушаалын хуулийн үндэслэлийг оруулна уу'});
+    const pdf=await createEmployeePdf({kind,employee,fields:{...fields,projectName:(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0]?.name},approvers});
+    const {rows}=await query('INSERT INTO public.documents(project_id,employee_id,kind,fields,approvers,pdf,created_by) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7) RETURNING id,created_at AS "createdAt"',[currentProject(),employee.id,kind,JSON.stringify(fields),JSON.stringify(approvers),pdf,req.user.id]);
+    await audit(req,'documents','create',rows[0].id,{employeeId:employee.id,kind,fields,approvers});
+    res.json({id:rows[0].id,employeeId:employee.id,kind,fields,approvers,createdAt:rows[0].createdAt});
+  }catch(error){res.status(400).json({error:error.message})}
+});
+app.get('/api/documents/:id/pdf',auth,documentEditor,async(req,res)=>{
+  const row=(await query('SELECT kind,pdf FROM public.documents WHERE id=$1 AND project_id=$2',[Number(req.params.id),currentProject()])).rows[0];
+  if(!row)return res.status(404).json({error:'Баримт олдсонгүй'});
+  res.set({'Content-Type':'application/pdf','Content-Disposition':`inline; filename="hr-${row.kind}-${req.params.id}.pdf"`,'Cache-Control':'private, no-store'}).send(row.pdf);
+});
+app.delete('/api/documents/:id',auth,admin,async(req,res)=>{
+  const {rows}=await query('DELETE FROM public.documents WHERE id=$1 AND project_id=$2 RETURNING id,employee_id,kind',[Number(req.params.id),currentProject()]);
+  if(!rows[0])return res.status(404).json({error:'Баримт олдсонгүй'});
+  await audit(req,'documents','delete',rows[0].id,{employeeId:rows[0].employee_id,kind:rows[0].kind});res.json({ok:true});
+});
+app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users WHERE project_id=$1 OR role=$2 ORDER BY id', [currentProject(),'admin'])).rows));
 app.post('/api/users', auth, admin, async (req, res) => {
   const { username, name, role, password, campId, projectId, employeeId } = req.body;
   if (!username || !name || !roles.includes(role) || !validPassword(password)) return res.status(400).json({ error: 'Нэр, эрх, 8+ тэмдэгттэй том/жижиг үсэг, тоо, тэмдэгт орсон нууц үг оруулна уу' });
@@ -259,7 +324,7 @@ app.post('/api/users', auth, admin, async (req, res) => {
 });
 app.patch('/api/users/:id', auth, admin, async (req, res) => {
   const user = (await query('SELECT * FROM public.users WHERE id=$1', [Number(req.params.id)])).rows[0];
-  if (!user) return res.status(404).json({ error: 'Хэрэглэгч олдсонгүй' });
+  if (!user || (user.role !== 'admin' && Number(user.project_id) !== currentProject())) return res.status(404).json({ error: 'Хэрэглэгч олдсонгүй' });
   const role = roles.includes(req.body.role) ? req.body.role : user.role;
   const campId = role === 'camp' ? Number(req.body.campId ?? user.camp_id) : null;
   if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
@@ -365,6 +430,10 @@ app.post('/api/records/:type', auth, editor, async (req, res) => {
       const plan = await withTransaction(async db => { const created = await insert(type, value, db); await syncPlanAssignments(created.id, value, db); await audit(req,type,'create',created.id,{name:created.name},db); return created; });
       return res.json(plan);
     }
+    if (type === 'shiftOverrides') {
+      const created = await withTransaction(async db => { const record=await insert(type,value,db);const changed=await applyShiftOverride(record.id,value,db);await audit(req,type,'create',record.id,{changedAssignments:changed},db);return record; });
+      return res.json(created);
+    }
     const created = await insert(type, value);
     await audit(req,type,'create',created.id,{ sourceRow: created.sourceRow || null });
     res.json(created);
@@ -384,6 +453,10 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
     }
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
+    if (type === 'shiftOverrides') {
+      await withTransaction(async db => {await undoShiftOverride(id,db);await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),type,Number(id),currentProject()],db);const changed=await applyShiftOverride(id,value,db);await audit(req,type,'update',Number(id),{changedAssignments:changed},db)});
+      return res.json(await get(type,id));
+    }
     if (type === 'plans') await withTransaction(async db => {
       await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4', [JSON.stringify(value), type, Number(id), currentProject()], db);
       await syncPlanAssignments(id, value, db);
@@ -413,6 +486,7 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
           await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', ['assignments', row.id, currentProject()], db);
         }
       }
+      if (type === 'shiftOverrides') await undoShiftOverride(id,db);
       await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', [type, Number(id), currentProject()], db);
       await audit(req,type,'delete',Number(id),{ deletedFields:Object.keys(old).filter(key=>!['createdAt','updatedAt'].includes(key)) },db);
     });
@@ -459,37 +533,6 @@ app.post('/api/imports/:id/undo', auth, admin, async (req, res) => {
     res.json({count});
   } catch (error) { bad(res,error); }
 });
-app.post('/api/admin/replace-project-data', auth, admin, async (req, res) => {
-  try {
-    const project = (await query('SELECT id,name FROM public.projects WHERE id=$1', [currentProject()])).rows[0];
-    if (!project || req.body?.confirm !== project.name) throw new Error('Төслийн нэрээр баталгаажуулна уу');
-    const rows = req.body?.employees;
-    if (!Array.isArray(rows) || rows.length < 1 || rows.length > 2000) throw new Error('Ажилтны өгөгдөл 1–2000 мөр байна');
-    const values = [];
-    for (const [index,row] of rows.entries()) {
-      try { values.push(await validate('employees',row)); }
-      catch (error) { throw new Error(`${index+1}-р мөр: ${error.message}`); }
-    }
-    if (new Set(values.map(row=>String(row.register).toUpperCase())).size!==values.length) throw new Error('Импортод давхардсан регистр байна');
-    const result = await withTransaction(async db => {
-      const previous = (await query('SELECT type,count(*)::int AS count FROM public.records WHERE project_id=$1 OR project_id IS NULL GROUP BY type', [currentProject()],db)).rows;
-      await query('DELETE FROM public.submissions s USING public.records r WHERE s.assignment_id=r.id AND (r.project_id=$1 OR r.project_id IS NULL)', [currentProject()],db);
-      await query('DELETE FROM public.records WHERE project_id=$1 OR project_id IS NULL', [currentProject()],db);
-      await query('DELETE FROM public.audit_logs WHERE project_id=$1', [currentProject()],db);
-      await query('DELETE FROM public.import_batches WHERE project_id=$1', [currentProject()],db);
-      await query('DELETE FROM public.sessions WHERE user_id IN (SELECT id FROM public.users WHERE role<>$1 AND project_id=$2)', ['admin',currentProject()],db);
-      await query('DELETE FROM public.users WHERE role<>$1 AND project_id=$2', ['admin',currentProject()],db);
-      await query('DELETE FROM public.role_permissions WHERE project_id=$1', [currentProject()],db);
-      const batch = (await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),'employees',String(req.body.filename||'ЗӨВ ШИЙТ.xls'),values.length,req.user.id],db)).rows[0];
-      await query('INSERT INTO public.records(type,body,project_id,import_batch_id) SELECT $1,items.body,$2,$3 FROM jsonb_array_elements($4::jsonb) AS items(body)', ['employees',currentProject(),batch.id,JSON.stringify(values)],db);
-      await audit(req,'projects','reset',project.id,{previous,importedEmployees:values.length,source:String(req.body.filename||'')},db);
-      await audit(req,'employees','import',null,{batchId:batch.id,count:values.length},db);
-      return { previous, importedEmployees:values.length, batchId:batch.id };
-    });
-    res.json(result);
-  } catch (error) { bad(res,error); }
-});
-
 app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
   try {
     const file = Buffer.from(String(req.body.fileBase64 || ''), 'base64');

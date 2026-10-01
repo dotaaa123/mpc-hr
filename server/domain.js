@@ -21,7 +21,7 @@ export const required = {
   bedAssignments: ['employeeId','startDate'],
 };
 export const permitted = {
-  employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','status','notes','sourceSheet','sourceRow'],
+  employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','initialDayNight','status','notes','sourceSheet','sourceRow'],
   attendance: ['date','employeeId','status','plannedHours','actualHours','campId','notes'],
   equipment: ['parkNo','kind','brand','model','vin','plateNo','site','warehouseId','owner','currentHours','fuelRate','status','availability','year','sourceStatus','contractNo','contractCompany','unitPriceMnt','currency','warranty','certificate','customsDocument','passport','sourceSheet','sourceRow','sourceData','notes'],
   camps: ['name','location','capacity','workType','manager','notes'],
