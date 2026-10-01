@@ -74,7 +74,7 @@ function validate(type, body) {
   const missing=required[type].filter(k => value[k]===undefined || value[k]==='');
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
   if (type==='employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
-  if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
+  if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';}
   if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'));

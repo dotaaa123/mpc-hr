@@ -16,7 +16,7 @@ export function rosterState(employee, date, attendance = [], overrides = []) {
 
   const actual = attendance.find(row => row.date === date && Number(row.employeeId) === employeeId);
   if (actual) {
-    const labels = { day:'Өдөр ажилласан', night:'Шөнө ажилласан', absent:'Ажиллаагүй', rest:'Амралттай', leave:'Чөлөөтэй' };
+    const labels = { day:'Өдөр ажилласан', night:'Шөнө ажилласан', travel:'Замд явсан', absent:'Ажиллаагүй', rest:'Амралттай', leave:'Чөлөөтэй' };
     return { code:actual.status, label:labels[actual.status] || actual.status, available:['day','night'].includes(actual.status), shift:['day','night'].includes(actual.status)?actual.status:null, actualHours:Number(actual.actualHours || 0), recorded:true };
   }
   if (replacement) return { code:'extended', label:'Орлон / сунгаж ажиллах', available:true, shift:replacement.shift || null, overrideId:replacement.id };

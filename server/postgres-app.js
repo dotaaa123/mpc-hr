@@ -102,7 +102,7 @@ async function validate(type, body, db) {
   const missing = required[type].filter(key => value[key] === undefined || value[key] === '');
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
-  if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
+  if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive'; }
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db));
@@ -511,13 +511,15 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
     await withTransaction(async db => {
       const machineIds=type==='machineLogs'?[...new Set(rows.map(row=>Number(row.equipmentId)).filter(Boolean))]:[];
       const beforeHours=Object.fromEntries(await Promise.all(machineIds.map(async id=>[id,Number((await get('equipment',id,db))?.currentHours||0)])));
+      const attendanceKeys=type==='attendance'?new Set((await all('attendance',db)).map(row=>`${row.employeeId}:${row.date}`)):null;
       const batch = await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),type,String(req.body.filename || '').slice(0,200),rows.length,req.user.id],db);
       batchId = batch.rows[0].id;
       for (const [index, row] of rows.entries()) {
         try {
           const value = await validate(type, row, db);
           if (!await canEditRecord(req, type, value, db)) throw new Error('Өөр camp-ийн ажилтан');
-          const record = await insert(type, value, db, batchId);
+          if(attendanceKeys){const key=`${value.employeeId}:${value.date}`;if(attendanceKeys.has(key))throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');attendanceKeys.add(key)}
+          const record = attendanceKeys ? rowRecord((await query('INSERT INTO public.records(type,body,project_id,import_batch_id) VALUES($1,$2::jsonb,$3,$4) RETURNING id,body,created_at,updated_at',[type,JSON.stringify(value),currentProject(),batchId],db)).rows[0]) : await insert(type, value, db, batchId);
           if (type === 'plans') await syncPlanAssignments(record.id, value, db);
           if (type === 'shiftOverrides') await applyShiftOverride(record.id,value,db);
         } catch (error) { throw new Error(`${index + 2}-р мөр: ${error.message}`); }
