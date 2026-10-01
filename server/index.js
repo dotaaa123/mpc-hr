@@ -10,6 +10,7 @@ import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
+import { normalizeMaintenance } from '../shared/maintenance.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -102,6 +103,7 @@ function validate(type, body) {
   if (type==='mealFeedback'&&Number(get('employees',value.employeeId)?.campId)!==Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
   if (type==='bedAssignments'&&value.endDate&&value.endDate<value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (type==='maintenance'&&!get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
+  if (type==='maintenance') normalizeMaintenance(value);
   if (type==='shiftOverrides'&&(!get('employees',value.replacementEmployeeId)||value.originalEmployeeId&&!get('employees',value.originalEmployeeId)||Number(value.originalEmployeeId)===Number(value.replacementEmployeeId))) throw new Error('Ээлжийн ажилтан буруу байна');
   if (type==='mealFeedback'&&value.approvedAllowance!==undefined&&(!Number.isFinite(Number(value.approvedAllowance))||Number(value.approvedAllowance)<0)) throw new Error('Баталсан нэмэгдлийн дүн буруу байна');
   if (type==='mealFeedback'&&value.hrStatus&&!['pending','approved','rejected'].includes(value.hrStatus)) throw new Error('HR шийдвэр буруу байна');

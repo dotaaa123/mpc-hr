@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
+import { normalizeMaintenance } from '../shared/maintenance.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -130,6 +131,7 @@ async function validate(type, body, db) {
   if (type === 'mealFeedback' && Number((await get('employees',value.employeeId,db))?.campId) !== Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
   if (type === 'bedAssignments' && value.endDate && value.endDate < value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (['maintenance'].includes(type) && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
+  if (type === 'maintenance') normalizeMaintenance(value);
   if (type === 'shiftOverrides') {
     if (!await get('employees', value.replacementEmployeeId, db)) throw new Error('Орлон ажиллах ажилтан олдсонгүй');
     if (value.originalEmployeeId && !await get('employees', value.originalEmployeeId, db)) throw new Error('Солигдох ажилтан олдсонгүй');
