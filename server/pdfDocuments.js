@@ -59,11 +59,12 @@ export async function createEmployeePdf({kind,employee,fields={},approvers=[]}) 
     draw('ГҮЙЦЭТГЭХ ЗАХИРЛЫН ТУШААЛ',15,{center:true,after:10});
     draw(`${date}                         Дугаар № ${fields.orderNumber || '______'}                         ${fields.city || 'Улаанбаатар хот'}`,9,{after:8});
     rule();
-    draw(kind==='hiring'?'АЖИЛД ТОМИЛОХ ТУХАЙ':'АЖЛААС ЧӨЛӨӨЛӨХ ТУХАЙ',13,{center:true,after:10});
+    const trialMonths=Number(fields.trialMonths||0);
+    draw(kind==='hiring'&&trialMonths>0?'ТУРШИЛТЫН ХУГАЦААГААР АЖИЛД ТОМИЛОХ ТУХАЙ':kind==='hiring'?'АЖИЛД ТОМИЛОХ ТУХАЙ':'АЖЛААС ЧӨЛӨӨЛӨХ ТУХАЙ',13,{center:true,after:10});
     label('Үндэслэл',fields.legalBasis);
     draw('ТУШААХ нь:',11,{after:8});
     if(kind==='hiring'){
-      draw(`Нэг. ${company}-ийн ${fields.projectName || 'Ууцар'} төслийн ${employee.branch || '________________'} салбарт ${fullName} (РД: ${employee.register || '________'})-ыг ${employee.position || '________________'} албан тушаалд ${fields.effectiveDate || employee.hireDate || date}-ны өдрөөс томилсугай.`,10,{after:8});
+      draw(`Нэг. ${company}-ийн ${fields.projectName || 'Ууцар'} төслийн ${employee.branch || '________________'} салбарт ${fullName} (РД: ${employee.register || '________'})-ыг ${employee.position || '________________'} албан тушаалд ${fields.effectiveDate || employee.hireDate || date}-ны өдрөөс ${trialMonths>0?`${trialMonths} сарын туршилтын хугацаагаар `:''}томилсугай.`,10,{after:8});
       draw(`Хоёр. Үндсэн цалин: ${Number(employee.baseSalary || 0).toLocaleString('mn-MN')} төгрөг. Цалингийн нөхцөлийг хөдөлмөрийн гэрээ болон батлагдсан журмын дагуу хэрэгжүүлсүгэй.`,10,{after:8});
       draw('Гурав. Хөдөлмөрийн гэрээ, ажлын байрны тодорхойлолт болон дотоод журмыг ажилтанд танилцуулж баталгаажуулахыг Хүний нөөцөд даалгасугай.',10,{after:8});
     }else{
@@ -95,13 +96,15 @@ export async function createEmployeePdf({kind,employee,fields={},approvers=[]}) 
     label('Огноо',date);label('Нэр',fullName);label('Хэлтэс',employee.branch);label('Албан тушаал',employee.position);
     label('Байршил',fields.location);label('Ажиллах болсон шалтгаан',fields.reason);
     label('Эхлэх',fields.startDate);label('Дуусах',fields.endDate);
+    draw(`Зөвшөөрсөн: ${fields.approvalDecision==='approved'?'[X]':'[ ]'}     Зөвшөөрөөгүй: ${fields.approvalDecision==='rejected'?'[X]':'[ ]'}`,10,{after:4});
+    draw(`Цалинтай 1.5: ${fields.payMode==='paid_1_5'?'[X]':'[ ]'}     Цалингүй: ${fields.payMode==='unpaid'?'[X]':'[ ]'}`,10,{after:4});
     label('Цалингийн нөхцөл',fields.payCondition);
     y-=18;rule();
     for(const person of approvers.slice(0,8)) label(person.position,person.name);
     if(!approvers.length){label('Ажилтны гарын үсэг','');label('Бүртгэсэн','');label('Хянасан','');label('Зөвшөөрсөн','');label('Баталсан','')}
   } else if(kind==='certificate') {
     draw(company,14,{center:true,after:8});
-    draw(fields.companyAddress || 'Улаанбаатар хот',9,{center:true,after:10});
+    draw(fields.companyAddress || 'Улаанбаатар хот, Сүхбаатар дүүрэг, 1 дүгээр хороо, Олимпийн гудамж 7/3 байр',9,{center:true,after:10});
     rule();
     draw(`Огноо: ${date}                                      Дугаар: ${fields.orderNumber || '______'}`,9,{after:18});
     draw('АЖИЛТНЫ ТОДОРХОЙЛОЛТ',15,{center:true,after:18});
