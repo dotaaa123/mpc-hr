@@ -1,5 +1,5 @@
 export const roles = ['admin', 'dispatcher', 'clerk', 'camp', 'hr'];
-export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments'];
+export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'productionEntries', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments'];
 export const required = {
   employees: ['lastName', 'firstName', 'register', 'position'],
   attendance: ['date','employeeId','status'],
@@ -7,10 +7,11 @@ export const required = {
   camps: ['name'],
   warehouses: ['name'],
   plans: ['name', 'startDate', 'endDate', 'targetOutput'],
+  productionEntries: ['date','kind','material','amount'],
   assignments: ['date', 'title', 'shift'],
   fuel: ['date', 'kind', 'liters'],
   other: ['date', 'name', 'amount'],
-  machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours'],
+  machineLogs: ['date','equipmentId','workShift','startHours','endHours','productiveHours'],
   guests: ['name','arrivalDate'],
   campStays: ['date','campId','category','count'],
   maintenance: ['date','equipmentId','reason','startTime'],
@@ -27,10 +28,11 @@ export const permitted = {
   camps: ['name','location','capacity','workType','manager','notes'],
   warehouses: ['name','location','manager','notes'],
   plans: ['name','startDate','endDate','site','warehouseId','shift','targetOutput','outputUnit','unitRevenue','requiredEquipment','equipmentNeeds','requiredWorkers','employeeIds','equipmentIds','plannedHours','plannedFuel','notes'],
+  productionEntries: ['date','kind','shift','haulParkNo','excavatorParkNo','pit','block','level','material','materialType','race','dump','capacity','amount','sourceFile','sourceSheet','sourceRow','notes'],
   assignments: ['date','title','site','shift','employeeId','equipmentId','planId','campId','plannedHours','plannedFuel','plannedOutput','autoPlanId','scheduleKey','notes'],
   fuel: ['date','kind','equipmentId','liters','pricePerLiter','supplier','notes'],
   other: ['date','name','category','amount','notes'],
-  machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours','startKm','endKm','startTime','endTime','stopMinutes','stopReason','operatorConfirmed','masterConfirmed','dispatcherChecked','fuelUsed','notes'],
+  machineLogs: ['date','equipmentId','employeeId','workShift','shiftGroup','startHours','endHours','productiveHours','moveHours','fuelingHours','noFuelHours','noOperatorHours','surveyHours','safetyHours','loadingWaitHours','engineeringHours','personalHours','safetyMeetingHours','handoverHours','mealBreakHours','repairHours','lubricationHours','readyHours','weatherHours','managementHours','startKm','endKm','startTime','endTime','stopMinutes','stopReason','operatorConfirmed','masterConfirmed','dispatcherChecked','fuelUsed','notes'],
   guests: ['name','organization','phone','register','arrivalDate','departureDate','purpose','campId','notes'],
   campStays: ['date','category','employeeId','guestId','campId','count','breakfast','lunch','dinner','mealRate','lodgingRate','rentalCompany','notes'],
   maintenance: ['date','equipmentId','reason','startTime','endTime','minutes','status','notes'],

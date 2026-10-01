@@ -7,6 +7,11 @@ const links = {
 };
 
 export function findDependentRecord(type,id,records) {
+  if(type==='equipment'){
+    const parkNo=String((records.equipment||[]).find(row=>Number(row.id)===Number(id))?.parkNo||'').trim().toUpperCase();
+    const production=parkNo&&(records.productionEntries||[]).find(row=>row.haulParkNo===parkNo||row.excavatorParkNo===parkNo);
+    if(production)return {type:'productionEntries',id:production.id};
+  }
   for (const [source,fields] of Object.entries(links[type]||{})) {
     const row=(records[source]||[]).find(item=>fields.some(field=>Array.isArray(item[field])?item[field].some(value=>Number(value)===Number(id)):Number(item[field])===Number(id)));
     if(row)return {type:source,id:row.id};

@@ -11,6 +11,8 @@ import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
+import { validateProduction, productionSourceKey } from './production.js';
+import { validateShiftHours } from '../shared/shiftHours.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -63,9 +65,9 @@ function auth(req,res,next) {
   req.user=session; next();
 }
 const admin = (req,res,next) => req.user.role==='admin' ? next() : res.status(403).json({error:'Зөвхөн админ эрхтэй'});
-const defaultPermissions={dispatcher:{assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read']}};
+const defaultPermissions={dispatcher:{assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read']}};
 const permissionPages=[...types,'documents'];
-const permissionsFor=user=>user.role==='admin'?Object.fromEntries(permissionPages.map(page=>[page,['read','create','update','delete']])):JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions || JSON.stringify(defaultPermissions[user.role] || {}));
+const permissionsFor=user=>user.role==='admin'?Object.fromEntries(permissionPages.map(page=>[page,['read','create','update','delete']])):{...(defaultPermissions[user.role]||{}),...JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions||'{}')};
 const allowed=(req,page,action)=>Boolean(permissionsFor(req.user)[page]?.includes(action));
 const editor=(req,res,next)=>allowed(req,req.params.type,req.method==='DELETE'?'delete':req.method==='PUT'||req.method==='PATCH'?'update':'create')?next():res.status(403).json({error:'Бүртгэх эрхгүй'});
 function audit(req,page,action,recordId,details={}) {db.prepare('INSERT INTO audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES(?,?,?,?,?,?,?,?)').run(currentProject(),req.user.id,req.user.username,req.user.role,page,action,recordId||null,JSON.stringify(details))}
@@ -80,13 +82,19 @@ function validate(type, body) {
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=get('employees',id);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
   if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'),all('attendance'),all('shiftOverrides'));
+  if (type==='productionEntries') validateProduction(value);
   if (type==='assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type==='assignments' && value.employeeId && !get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
   if (type==='assignments'&&value.employeeId) assertAssignable(get('employees',value.employeeId),value.date,value.shift,all('attendance'),all('shiftOverrides'));
   if (type==='assignments' && value.equipmentId && !get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
   if (type==='assignments' && value.planId && !get('plans',value.planId)) throw new Error('Төлөвлөгөө олдсонгүй');
-  if (type==='machineLogs' && (!get('employees',value.employeeId) || !get('equipment',value.equipmentId))) throw new Error('Оператор эсвэл техник олдсонгүй');
+  if (type==='machineLogs' && (value.employeeId&&!get('employees',value.employeeId) || !get('equipment',value.equipmentId))) throw new Error('Оператор эсвэл техник олдсонгүй');
+  if (type==='machineLogs'&&!['day','night'].includes(value.workShift)) throw new Error('Өдөр/шөнийн ээлж сонгоно уу');
+  if (type==='machineLogs'&&value.shiftGroup&&!['A','B','C','D'].includes(value.shiftGroup)) throw new Error('A/B/C/D ээлж буруу байна');
+  if (type==='machineLogs'&&value.employeeId&&!value.shiftGroup) throw new Error('Операторын A/B/C/D ээлжийг сонгоно уу');
+  if (type==='machineLogs'&&value.employeeId&&get('employees',value.employeeId)?.shiftGroup!==value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
   if (type==='machineLogs' && (Number(value.endHours)<Number(value.startHours) || Number(value.startHours)<0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type==='machineLogs') validateShiftHours(value);
   if (type==='machineLogs' && value.endKm!==undefined && Number(value.endKm)<Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type)&&value.employeeId&&!get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
   if (type==='campStays') {
@@ -112,6 +120,8 @@ function validate(type, body) {
   return value;
 }
 function ensureUnique(type,value,excludeId) {
+  if(type==='machineLogs'&&all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&row.workShift===value.workShift&&Number(row.equipmentId)===Number(value.equipmentId)))throw new Error('Энэ техникийн тухайн ээлжийн бүртгэл аль хэдийн байна');
+  if (type==='productionEntries'&&productionSourceKey(value)&&all(type).some(row=>row.id!==Number(excludeId)&&productionSourceKey(row)===productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type==='employees' && all(type).some(row=>row.id!==Number(excludeId)&&row.register===value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type==='attendance' && all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type==='equipment' && all(type).some(row=>row.id!==Number(excludeId)&&(value.vin&&row.vin===value.vin||!value.vin&&row.parkNo===value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
@@ -210,7 +220,7 @@ app.patch('/api/me/password',auth,(req,res) => {
 });
 app.get('/api/projects',auth,admin,(_req,res)=>res.json(db.prepare('SELECT id,name,active FROM projects ORDER BY id').all()));
 app.post('/api/projects',auth,admin,(req,res)=>{const name=String(req.body?.name||'').trim();if(name.length<2||name.length>100)return res.status(400).json({error:'Төслийн нэр 2–100 тэмдэгт байна'});try{const id=db.prepare('INSERT INTO projects(name) VALUES(?)').run(name).lastInsertRowid;audit(req,'projects','create',id,{name});res.json({id,name,active:1})}catch{res.status(409).json({error:'Ийм нэртэй төсөл байна'})}});
-app.get('/api/permissions',auth,(req,res)=>{if(req.user.role==='admin'){const stored=db.prepare('SELECT role,permissions FROM role_permissions WHERE project_id=?').all(currentProject());return res.json(Object.fromEntries(roles.map(role=>[role,JSON.parse(stored.find(row=>row.role===role)?.permissions||JSON.stringify(defaultPermissions[role]||{}))])))}res.json({[req.user.role]:permissionsFor(req.user)})});
+app.get('/api/permissions',auth,(req,res)=>{if(req.user.role==='admin'){const stored=db.prepare('SELECT role,permissions FROM role_permissions WHERE project_id=?').all(currentProject());return res.json(Object.fromEntries(roles.map(role=>[role,{...(defaultPermissions[role]||{}),...JSON.parse(stored.find(row=>row.role===role)?.permissions||'{}')}])))}res.json({[req.user.role]:permissionsFor(req.user)})});
 app.put('/api/permissions/:role',auth,admin,(req,res)=>{const role=req.params.role,input=req.body?.permissions;if(!roles.includes(role)||role==='admin'||!input||typeof input!=='object'||Array.isArray(input))return res.status(400).json({error:'Эрхийн тохиргоо буруу байна'});const actions=['read','create','update','delete'];const permissions=Object.fromEntries(Object.entries(input).filter(([page])=>permissionPages.includes(page)).map(([page,list])=>[page,Array.isArray(list)?list.filter(action=>actions.includes(action)):[]]));db.prepare('INSERT INTO role_permissions(project_id,role,permissions) VALUES(?,?,?) ON CONFLICT(project_id,role) DO UPDATE SET permissions=excluded.permissions,updated_at=CURRENT_TIMESTAMP').run(currentProject(),role,JSON.stringify(permissions));audit(req,'permissions','update',null,{role,permissions});res.json({role,permissions})});
 app.get('/api/audit',auth,admin,(req,res)=>{const role=String(req.query.role||''),page=String(req.query.page||'');res.json(db.prepare(`SELECT id,username,role,page,action,record_id AS recordId,details,created_at AS createdAt FROM audit_logs WHERE project_id=? AND (?='' OR role=?) AND (?='' OR page=?) ORDER BY id DESC LIMIT 1000`).all(currentProject(),role,role,page,page).map(row=>({...row,details:JSON.parse(row.details)})))});
 app.get('/api/imports',auth,admin,(_req,res)=>res.json(db.prepare('SELECT id,type,filename,row_count AS rowCount,created_at AS createdAt,undone_at AS undoneAt FROM import_batches WHERE project_id=? ORDER BY id DESC LIMIT 200').all(currentProject())));
@@ -339,7 +349,7 @@ app.post('/api/import/:type',auth,editor,(req,res)=>{
   const type=req.params.type;
   if(!types.includes(type))return res.status(404).end();
   const rows=req.body.rows;
-  if(!Array.isArray(rows)||rows.length>2000)return res.status(400).json({error:'2000 хүртэл мөр импортлох боломжтой'});
+  if(!Array.isArray(rows)||rows.length>(type==='productionEntries'?3000:2000))return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
   try{
     const values=rows.map((row,i)=>{try{const value=validate(type,row);if(!canEditRecord(req,type,value))throw new Error('Өөр camp-ийн ажилтан');return value}catch(error){throw new Error(`${i+2}-р мөр: ${error.message}`)}});
     db.exec('BEGIN');
@@ -347,7 +357,8 @@ app.post('/api/import/:type',auth,editor,(req,res)=>{
       const machineIds=type==='machineLogs'?[...new Set(values.map(row=>Number(row.equipmentId)).filter(Boolean))]:[];
       const beforeHours=Object.fromEntries(machineIds.map(id=>[id,Number(get('equipment',id)?.currentHours||0)]));
       const batchId=db.prepare('INSERT INTO import_batches(project_id,type,filename,row_count,created_by) VALUES(?,?,?,?,?)').run(currentProject(),type,String(req.body.filename||'').slice(0,200),values.length,req.user.id).lastInsertRowid;
-      for(const value of values){const record=insert(type,value);db.prepare('UPDATE records SET import_batch_id=? WHERE id=? AND project_id=?').run(batchId,record.id,currentProject());if(type==='plans')syncPlanAssignments(record.id,value);if(type==='shiftOverrides')applyShiftOverride(record.id,value)}
+      const sourceKeys=type==='productionEntries'?new Set(all(type).map(productionSourceKey).filter(Boolean)):null;
+      for(const value of values){if(sourceKeys){const key=productionSourceKey(value);if(key&&sourceKeys.has(key))throw new Error(`${value.sourceRow}-р Excel мөр өмнө импортлогдсон байна`);if(key)sourceKeys.add(key)}const stamp=new Date().toISOString();const record=sourceKeys?db.prepare('INSERT INTO records(project_id,type,body,import_batch_id,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(currentProject(),type,JSON.stringify(value),batchId,stamp,stamp):insert(type,value);if(!sourceKeys)db.prepare('UPDATE records SET import_batch_id=? WHERE id=? AND project_id=?').run(batchId,record.id,currentProject());if(type==='plans')syncPlanAssignments(record.id,value);if(type==='shiftOverrides')applyShiftOverride(record.id,value)}
       if(type==='machineLogs'){const afterHours=Object.fromEntries(machineIds.map(id=>[id,Number(get('equipment',id)?.currentHours||0)]));db.prepare('UPDATE import_batches SET undo_snapshot=? WHERE id=?').run(JSON.stringify({beforeHours,afterHours}),batchId)}
       audit(req,type,'import',null,{batchId,count:values.length,filename:String(req.body.filename||'').slice(0,200)});
       db.exec('COMMIT');res.json({count:values.length,batchId});

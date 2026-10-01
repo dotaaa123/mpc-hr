@@ -6,6 +6,8 @@ import { parseAllData } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
+import { validateProduction, productionSourceKey } from './production.js';
+import { validateShiftHours } from '../shared/shiftHours.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -68,7 +70,7 @@ async function auth(req, res, next) {
 }
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
 const defaultPermissions = {
-  dispatcher: { assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
+  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
   clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
   hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
@@ -77,7 +79,7 @@ const permissionPages=[...types,'documents'];
 async function allowed(req, page, action) {
   if (req.user.role === 'admin') return true;
   const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role]);
-  const permissions = rows[0]?.permissions || defaultPermissions[req.user.role] || {};
+  const permissions = { ...(defaultPermissions[req.user.role] || {}), ...(rows[0]?.permissions || {}) };
   return Array.isArray(permissions[page]) && permissions[page].includes(action);
 }
 const editor = async (req, res, next) => {
@@ -108,13 +110,19 @@ async function validate(type, body, db) {
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=await get('employees',id,db);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db), await all('attendance', db), await all('shiftOverrides', db));
+  if (type === 'productionEntries') validateProduction(value);
   if (type === 'assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type === 'assignments' && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
   if (type === 'assignments' && value.employeeId) assertAssignable(await get('employees',value.employeeId,db),value.date,value.shift,await all('attendance',db),await all('shiftOverrides',db));
   if (type === 'assignments' && value.equipmentId && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
   if (type === 'assignments' && value.planId && !await get('plans', value.planId, db)) throw new Error('Төлөвлөгөө олдсонгүй');
-  if (type === 'machineLogs' && (!await get('employees', value.employeeId, db) || !await get('equipment', value.equipmentId, db))) throw new Error('Оператор эсвэл техник олдсонгүй');
+  if (type === 'machineLogs' && (value.employeeId && !await get('employees', value.employeeId, db) || !await get('equipment', value.equipmentId, db))) throw new Error('Оператор эсвэл техник олдсонгүй');
+  if (type === 'machineLogs' && !['day','night'].includes(value.workShift)) throw new Error('Өдөр/шөнийн ээлж сонгоно уу');
+  if (type === 'machineLogs' && value.shiftGroup && !['A','B','C','D'].includes(value.shiftGroup)) throw new Error('A/B/C/D ээлж буруу байна');
+  if (type === 'machineLogs' && value.employeeId && !value.shiftGroup) throw new Error('Операторын A/B/C/D ээлжийг сонгоно уу');
+  if (type === 'machineLogs' && value.employeeId && (await get('employees',value.employeeId,db))?.shiftGroup !== value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
   if (type === 'machineLogs' && (Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type === 'machineLogs') validateShiftHours(value);
   if (type === 'machineLogs' && value.endKm !== undefined && Number(value.endKm) < Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type) && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
   if (type === 'campStays') {
@@ -144,8 +152,10 @@ async function validate(type, body, db) {
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
-  if (!['employees','attendance','equipment','assignments','campStays','bedAssignments'].includes(type)) return;
+  if (!['employees','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs'].includes(type)) return;
   const rows = await all(type, db);
+  if (type === 'machineLogs' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && row.workShift === value.workShift && Number(row.equipmentId) === Number(value.equipmentId))) throw new Error('Энэ техникийн тухайн ээлжийн бүртгэл аль хэдийн байна');
+  if (type === 'productionEntries' && productionSourceKey(value) && rows.some(row => row.id !== Number(excludeId) && productionSourceKey(row) === productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type === 'equipment' && rows.some(row => row.id !== Number(excludeId) && (value.vin && row.vin === value.vin || !value.vin && row.parkNo === value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
@@ -281,9 +291,9 @@ app.post('/api/projects', auth, admin, async (req, res) => {
 app.get('/api/permissions', auth, async (req, res) => {
   if (req.user.role === 'admin') {
     const rows = (await query('SELECT role,permissions FROM public.role_permissions WHERE project_id=$1', [currentProject()])).rows;
-    return res.json(Object.fromEntries(roles.map(role => [role, rows.find(row => row.role === role)?.permissions || defaultPermissions[role] || {}])));
+    return res.json(Object.fromEntries(roles.map(role => [role, { ...(defaultPermissions[role] || {}), ...(rows.find(row => row.role === role)?.permissions || {}) }])));
   }
-  res.json({ [req.user.role]: (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions || defaultPermissions[req.user.role] || {} });
+  res.json({ [req.user.role]: { ...(defaultPermissions[req.user.role] || {}), ...((await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions || {}) } });
 });
 app.put('/api/permissions/:role', auth, admin, async (req, res) => {
   const role = req.params.role;
@@ -444,7 +454,7 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   for(const row of recordResult.rows)grouped[row.type].push(rowRecord(row));
   const employees=grouped.employees,assignments=grouped.assignments;
   const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
-  const permissions = req.user.role==='admin' ? Object.fromEntries(types.map(type=>[type,['read','create','update','delete']])) : permissionRows[0]?.permissions || defaultPermissions[req.user.role] || {};
+  const permissions = req.user.role==='admin' ? Object.fromEntries(types.map(type=>[type,['read','create','update','delete']])) : { ...(defaultPermissions[req.user.role] || {}), ...(permissionRows[0]?.permissions || {}) };
   const records=Object.fromEntries(types.map(type=>[type,permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
   res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,projectId:currentProject()});
 });
@@ -540,13 +550,14 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
   const type = req.params.type;
   if (!types.includes(type)) return res.status(404).end();
   const rows = req.body.rows;
-  if (!Array.isArray(rows) || rows.length > 2000) return res.status(400).json({ error: '2000 хүртэл мөр импортлох боломжтой' });
+  if (!Array.isArray(rows) || rows.length > (type === 'productionEntries' ? 3000 : 2000)) return res.status(400).json({ error: 'Импортын мөрийн тоо хэтэрлээ' });
   try {
     let batchId;
     await withTransaction(async db => {
       const machineIds=type==='machineLogs'?[...new Set(rows.map(row=>Number(row.equipmentId)).filter(Boolean))]:[];
       const beforeHours=Object.fromEntries(await Promise.all(machineIds.map(async id=>[id,Number((await get('equipment',id,db))?.currentHours||0)])));
       const attendanceKeys=type==='attendance'?new Set((await all('attendance',db)).map(row=>`${row.employeeId}:${row.date}`)):null;
+      const sourceKeys=type==='productionEntries'?new Set((await all(type,db)).map(productionSourceKey).filter(Boolean)):null;
       const batch = await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),type,String(req.body.filename || '').slice(0,200),rows.length,req.user.id],db);
       batchId = batch.rows[0].id;
       for (const [index, row] of rows.entries()) {
@@ -554,7 +565,8 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
           const value = await validate(type, row, db);
           if (!await canEditRecord(req, type, value, db)) throw new Error('Өөр camp-ийн ажилтан');
           if(attendanceKeys){const key=`${value.employeeId}:${value.date}`;if(attendanceKeys.has(key))throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');attendanceKeys.add(key)}
-          const record = attendanceKeys ? rowRecord((await query('INSERT INTO public.records(type,body,project_id,import_batch_id) VALUES($1,$2::jsonb,$3,$4) RETURNING id,body,created_at,updated_at',[type,JSON.stringify(value),currentProject(),batchId],db)).rows[0]) : await insert(type, value, db, batchId);
+          if(sourceKeys){const key=productionSourceKey(value);if(key&&sourceKeys.has(key))throw new Error('Энэ Excel мөр өмнө импортлогдсон байна');if(key)sourceKeys.add(key)}
+          const record = attendanceKeys || sourceKeys ? rowRecord((await query('INSERT INTO public.records(type,body,project_id,import_batch_id) VALUES($1,$2::jsonb,$3,$4) RETURNING id,body,created_at,updated_at',[type,JSON.stringify(value),currentProject(),batchId],db)).rows[0]) : await insert(type, value, db, batchId);
           if (type === 'plans') await syncPlanAssignments(record.id, value, db);
           if (type === 'shiftOverrides') await applyShiftOverride(record.id,value,db);
         } catch (error) { throw new Error(`${index + 2}-р мөр: ${error.message}`); }
