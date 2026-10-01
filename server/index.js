@@ -2,6 +2,7 @@ import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { isDeepStrictEqual } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { parseAllData } from './allData.js';
@@ -330,6 +331,18 @@ app.post('/api/imports/:id/undo',auth,admin,(req,res)=>{
   if(!batch)return res.status(404).json({error:'Импорт олдсонгүй эсвэл буцаагдсан байна'});
   db.exec('BEGIN');
   try{
+    if(batch.type==='equipmentAllData'){
+      const snapshot=JSON.parse(batch.undo_snapshot||'{}');
+      if(!Array.isArray(snapshot.updated)||!Array.isArray(snapshot.warehouseIds))throw new Error('ALL DATA импортын сэргээх мэдээлэл байхгүй');
+      const records=db.prepare('SELECT id,type,body,import_batch_id AS importBatchId,created_at AS createdAt,updated_at AS updatedAt FROM records WHERE project_id=?').all(currentProject()).map(row=>({...row,body:JSON.parse(row.body)}));
+      importUndoPlan('equipment',batch.id,records);
+      for(const item of snapshot.updated){const current=get('equipment',item.id);const {id,createdAt,updatedAt,...body}=current||{};if(!current||!isDeepStrictEqual(body,item.after))throw new Error('ALL DATA-аар шинэчилсэн техникийг дараа нь зассан тул буцаах боломжгүй')}
+      for(const item of snapshot.updated)db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=? AND project_id=?').run(JSON.stringify(item.before),new Date().toISOString(),item.id,currentProject());
+      const deleted=db.prepare('DELETE FROM records WHERE type=? AND import_batch_id=? AND project_id=?').run('equipment',batch.id,currentProject());
+      for(const id of snapshot.warehouseIds){const warehouse=db.prepare('SELECT id,created_at AS createdAt,updated_at AS updatedAt FROM records WHERE type=? AND id=? AND project_id=?').get('warehouses',id,currentProject());if(!warehouse||warehouse.createdAt!==warehouse.updatedAt)throw new Error('ALL DATA-аар үүссэн агуулахыг зассан тул буцаах боломжгүй');const linked=db.prepare("SELECT id FROM records WHERE project_id=? AND json_extract(body,'$.warehouseId')=? LIMIT 1").get(currentProject(),id);if(linked)throw new Error('ALL DATA-аар үүссэн агуулахыг өөр бүртгэл ашиглаж байна');db.prepare('DELETE FROM records WHERE id=? AND project_id=?').run(id,currentProject())}
+      db.prepare('UPDATE import_batches SET undone_at=CURRENT_TIMESTAMP WHERE id=?').run(batch.id);
+      audit(req,'equipment','import_undo',null,{batchId:batch.id,deleted:deleted.changes,restored:snapshot.updated.length});db.exec('COMMIT');return res.json({count:deleted.changes+snapshot.updated.length});
+    }
     const snapshot=JSON.parse(batch.undo_snapshot||'{}');
     if(batch.type==='machineLogs'){
       if(!snapshot.beforeHours||!snapshot.afterHours)throw new Error('Хуучин мото цагийн импортын суурь заалт хадгалагдаагүй тул автоматаар буцаах боломжгүй');
@@ -355,26 +368,37 @@ app.post('/api/equipment-all-data/import',auth,admin,async(req,res) => {
     if (!file.length || file.length>8_000_000) throw new Error('Excel файл 8 MB хүртэл хэмжээтэй байна');
     const {records,totalRows}=await parseAllData(file);
     if (!records.length) throw new Error('VIN-тэй техникийн мөр олдсонгүй');
-    const existing=new Map(all('equipment').filter(r=>r.vin).map(r=>[String(r.vin).toUpperCase(),r]));
     let added=0,updated=0;
+    let batchId;
     db.exec('BEGIN');
     try {
+      batchId=db.prepare('INSERT INTO import_batches(project_id,type,filename,row_count,created_by) VALUES(?,?,?,?,?)').run(currentProject(),'equipmentAllData',String(req.body.filename||'ALL DATA.xlsx').slice(0,200),records.length,req.user.id).lastInsertRowid;
+      const existing=new Map(all('equipment').filter(r=>r.vin).map(r=>[String(r.vin).toUpperCase(),r]));
+      const snapshot={updated:[],warehouseIds:[]};
+      const seenVin=new Set();
       for (const record of records) {
+        const vin=String(record.vin||'').toUpperCase();if(seenVin.has(vin))throw new Error(`ALL DATA-д VIN давхардсан: ${vin}`);seenVin.add(vin);
         if (record.availability==='available') {
           const warehouseName=record.site || 'Байршил тодорхойгүй';
-          const warehouse=all('warehouses').find(w=>w.name===warehouseName) || insert('warehouses',{name:warehouseName,location:warehouseName,notes:'ALL DATA sheet-ийн агуулахад бэлэн техникээс үүсэв'});
+          let warehouse=all('warehouses').find(w=>w.name===warehouseName);
+          if(!warehouse){warehouse=insert('warehouses',{name:warehouseName,location:warehouseName,notes:'ALL DATA sheet-ийн агуулахад бэлэн техникээс үүсэв'});snapshot.warehouseIds.push(warehouse.id)}
           record.warehouseId=warehouse.id;
         }
         const value=validate('equipment',record);
         const old=existing.get(record.vin.toUpperCase());
         if (old) {
-          db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=?').run(JSON.stringify({...value,fuelRate:old.fuelRate||value.fuelRate,notes:old.notes||value.notes}),new Date().toISOString(),old.id);
+          const {id,createdAt,updatedAt,...before}=old;
+          const after={...value,fuelRate:old.fuelRate||value.fuelRate,notes:old.notes||value.notes};
+          snapshot.updated.push({id:old.id,before,after});
+          db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=? AND project_id=?').run(JSON.stringify(after),new Date().toISOString(),old.id,currentProject());
           updated++;
-        } else { insert('equipment',value); added++; }
+        } else {const created=insert('equipment',value);db.prepare('UPDATE records SET import_batch_id=? WHERE id=? AND project_id=?').run(batchId,created.id,currentProject());existing.set(vin,created);added++}
       }
+      db.prepare('UPDATE import_batches SET undo_snapshot=? WHERE id=?').run(JSON.stringify(snapshot),batchId);
+      audit(req,'equipment','import',null,{batchId,added,updated,totalRows});
       db.exec('COMMIT');
     } catch(err) {db.exec('ROLLBACK');throw err;}
-    res.json({added,updated,totalRows});
+    res.json({added,updated,totalRows,batchId});
   } catch(err) {res.status(400).json({error:err.message});}
 });
 app.put('/api/records/:type/:id',auth,editor,(req,res) => {

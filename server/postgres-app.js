@@ -1,6 +1,7 @@
 import express from 'express';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { isDeepStrictEqual } from 'node:util';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule } from './planSchedule.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
@@ -535,6 +536,19 @@ app.post('/api/imports/:id/undo', auth, admin, async (req, res) => {
     const batch = (await query('SELECT * FROM public.import_batches WHERE id=$1 AND project_id=$2 AND undone_at IS NULL', [Number(req.params.id), currentProject()])).rows[0];
     if (!batch) return res.status(404).json({ error: 'Импорт олдсонгүй эсвэл буцаагдсан байна' });
     const count = await withTransaction(async db => {
+      if(batch.type==='equipmentAllData'){
+        const snapshot=batch.undo_snapshot||{};
+        if(!Array.isArray(snapshot.updated)||!Array.isArray(snapshot.warehouseIds))throw new Error('ALL DATA импортын сэргээх мэдээлэл байхгүй');
+        const records=(await query('SELECT id,type,body,import_batch_id AS "importBatchId",created_at AS "createdAt",updated_at AS "updatedAt" FROM public.records WHERE project_id=$1',[currentProject()],db)).rows;
+        importUndoPlan('equipment',batch.id,records);
+        for(const item of snapshot.updated){const current=await get('equipment',item.id,db);const {id,createdAt,updatedAt,...body}=current||{};if(!current||!isDeepStrictEqual(body,item.after))throw new Error('ALL DATA-аар шинэчилсэн техникийг дараа нь зассан тул буцаах боломжгүй')}
+        for(const item of snapshot.updated)await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3',[JSON.stringify(item.before),item.id,currentProject()],db);
+        const deleted=await query('DELETE FROM public.records WHERE type=$1 AND import_batch_id=$2 AND project_id=$3',['equipment',batch.id,currentProject()],db);
+        for(const id of snapshot.warehouseIds){const warehouse=(await query('SELECT id,created_at,updated_at FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3',['warehouses',id,currentProject()],db)).rows[0];if(!warehouse||String(warehouse.created_at)!==String(warehouse.updated_at))throw new Error('ALL DATA-аар үүссэн агуулахыг зассан тул буцаах боломжгүй');const linked=(await query("SELECT id FROM public.records WHERE project_id=$1 AND body->>'warehouseId'=$2 LIMIT 1",[currentProject(),String(id)],db)).rows[0];if(linked)throw new Error('ALL DATA-аар үүссэн агуулахыг өөр бүртгэл ашиглаж байна');await query('DELETE FROM public.records WHERE id=$1 AND project_id=$2',[id,currentProject()],db)}
+        await query('UPDATE public.import_batches SET undone_at=now() WHERE id=$1',[batch.id],db);
+        await audit(req,'equipment','import_undo',null,{batchId:batch.id,deleted:deleted.rowCount,restored:snapshot.updated.length},db);
+        return deleted.rowCount+snapshot.updated.length;
+      }
       const snapshot=batch.undo_snapshot||{};
       if(batch.type==='machineLogs'){
         if(!snapshot.beforeHours||!snapshot.afterHours)throw new Error('Хуучин мото цагийн импортын суурь заалт хадгалагдаагүй тул автоматаар буцаах боломжгүй');
@@ -564,26 +578,36 @@ app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
     const { records, totalRows } = await parseAllData(file);
     if (!records.length) throw new Error('VIN-тэй техникийн мөр олдсонгүй');
     let added = 0, updated = 0;
+    let batchId;
     await withTransaction(async db => {
+      const batch=await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id',[currentProject(),'equipmentAllData',String(req.body.filename||'ALL DATA.xlsx').slice(0,200),records.length,req.user.id],db);
+      batchId=batch.rows[0].id;
       const existing = new Map((await all('equipment', db)).filter(row => row.vin).map(row => [String(row.vin).toUpperCase(), row]));
       const warehouses = await all('warehouses', db);
+      const snapshot={updated:[],warehouseIds:[]};
+      const seenVin=new Set();
       for (const record of records) {
+        const vin=String(record.vin||'').toUpperCase();if(seenVin.has(vin))throw new Error(`ALL DATA-д VIN давхардсан: ${vin}`);seenVin.add(vin);
         if (record.availability === 'available') {
           const name = record.site || 'Байршил тодорхойгүй';
           let warehouse = warehouses.find(row => row.name === name);
-          if (!warehouse) { warehouse = await insert('warehouses', { name, location: name, notes: 'ALL DATA sheet-ийн агуулахад бэлэн техникээс үүсэв' }, db); warehouses.push(warehouse); }
+          if (!warehouse) { warehouse = await insert('warehouses', { name, location: name, notes: 'ALL DATA sheet-ийн агуулахад бэлэн техникээс үүсэв' }, db); warehouses.push(warehouse); snapshot.warehouseIds.push(warehouse.id); }
           record.warehouseId = warehouse.id;
         }
         const value = await validate('equipment', record, db);
         const old = existing.get(String(record.vin).toUpperCase());
         if (old) {
-          await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify({ ...value, fuelRate: old.fuelRate || value.fuelRate, notes: old.notes || value.notes }), old.id, currentProject()], db);
+          const {id,createdAt,updatedAt,...before}=old;
+          const after={...value,fuelRate:old.fuelRate||value.fuelRate,notes:old.notes||value.notes};
+          snapshot.updated.push({id:old.id,before,after});
+          await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify(after), old.id, currentProject()], db);
           updated++;
-        } else { const created = await insert('equipment', value, db); existing.set(String(record.vin).toUpperCase(), created); added++; }
+        } else { const created = await insert('equipment', value, db, batchId); existing.set(String(record.vin).toUpperCase(), created); added++; }
       }
-      await audit(req,'equipment','import',null,{added,updated,totalRows},db);
+      await query('UPDATE public.import_batches SET undo_snapshot=$1::jsonb WHERE id=$2',[JSON.stringify(snapshot),batchId],db);
+      await audit(req,'equipment','import',null,{batchId,added,updated,totalRows},db);
     });
-    res.json({ added, updated, totalRows });
+    res.json({ added, updated, totalRows, batchId });
   } catch (error) { bad(res, error); }
 });
 

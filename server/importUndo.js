@@ -8,7 +8,7 @@ const references = {
 };
 
 export function importUndoPlan(type,batchId,records) {
-  const imported=records.filter(row=>Number(row.importBatchId)===Number(batchId));
+  const imported=records.filter(row=>row.type===type&&Number(row.importBatchId)===Number(batchId));
   if(imported.some(row=>String(row.updatedAt)!==String(row.createdAt)))throw new Error('Импортолсон мөрийг дараа нь зассан тул автоматаар буцаах боломжгүй');
   const importedIds=new Set(imported.map(row=>Number(row.id)));
   const generated=type==='plans'?records.filter(row=>row.type==='assignments'&&importedIds.has(Number(row.body?.autoPlanId))):[];
