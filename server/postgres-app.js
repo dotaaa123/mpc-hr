@@ -1,23 +1,27 @@
 import express from 'express';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule } from './planSchedule.js';
 import { roles, types, required, permitted } from './domain.js';
 import { ensureSchema, getPool, withTransaction } from './pgdb.js';
 
 const app = express();
+const projectContext = new AsyncLocalStorage();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10mb' }));
 
 const query = (sql, params = [], db = getPool()) => db.query(sql, params);
 const clean = (type, body) => Object.fromEntries(permitted[type].filter(key => body?.[key] !== undefined && body[key] !== null).map(key => [key, typeof body[key] === 'string' ? body[key].trim() : body[key]]));
 const rowRecord = row => ({ id: row.id, ...row.body, createdAt: row.created_at, updatedAt: row.updated_at });
-const all = async (type, db) => (await query('SELECT id,body,created_at,updated_at FROM public.records WHERE type=$1 ORDER BY id DESC', [type], db)).rows.map(rowRecord);
+const currentProject = () => projectContext.getStore()?.projectId;
+const all = async (type, db) => (await query('SELECT id,body,created_at,updated_at FROM public.records WHERE type=$1 AND project_id=$2 ORDER BY id DESC', [type, currentProject()], db)).rows.map(rowRecord);
 const get = async (type, id, db) => {
-  const { rows } = await query('SELECT id,body,created_at,updated_at FROM public.records WHERE type=$1 AND id=$2', [type, Number(id) || 0], db);
+  const { rows } = await query('SELECT id,body,created_at,updated_at FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', [type, Number(id) || 0, currentProject()], db);
   return rows[0] && rowRecord(rows[0]);
 };
 const hash = password => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`; };
+const validPassword = value => typeof value === 'string' && value.length >= 8 && /\p{Lu}/u.test(value) && /\p{Ll}/u.test(value) && /\d/u.test(value) && /[^\p{L}\p{N}]/u.test(value);
 const verify = (password, stored) => {
   try { const [salt, digest] = stored.split(':'); const actual = scryptSync(password, salt, 64); const expected = Buffer.from(digest, 'hex'); return expected.length === actual.length && timingSafeEqual(expected, actual); }
   catch { return false; }
@@ -28,10 +32,13 @@ let seeded;
 async function initialize() {
   await ensureSchema();
   if (!seeded) seeded = (async () => {
+    await query("INSERT INTO public.projects(name) VALUES('Ууцар') ON CONFLICT(name) DO NOTHING");
+    const projectId = (await query("SELECT id FROM public.projects WHERE name='Ууцар'")).rows[0].id;
     const { rows } = await query('SELECT count(*)::integer AS count FROM public.users');
     if (!rows[0].count && process.env.ADMIN_PASSWORD?.length >= 12) {
-      await query('INSERT INTO public.users(username,name,role,password) VALUES($1,$2,$3,$4) ON CONFLICT (username) DO NOTHING', [process.env.ADMIN_USER || 'admin', 'Администратор', 'admin', hash(process.env.ADMIN_PASSWORD)]);
+      await query('INSERT INTO public.users(username,name,role,password,project_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING', [process.env.ADMIN_USER || 'admin', 'Администратор', 'admin', hash(process.env.ADMIN_PASSWORD), projectId]);
     }
+    await query('UPDATE public.users SET project_id=$1 WHERE project_id IS NULL', [projectId]);
   })().catch(error => { seeded = undefined; throw error; });
   await seeded;
 }
@@ -47,7 +54,7 @@ async function auth(req, res, next) {
   try {
     const token = cookies(req).mpchr;
     if (!token) return res.status(401).json({ error: 'Нэвтэрнэ үү' });
-    const { rows } = await query('SELECT u.id,u.username,u.name,u.role,u.camp_id AS "campId",u.active,s.expires_at FROM public.sessions s JOIN public.users u ON u.id=s.user_id WHERE s.token=$1', [token]);
+    const { rows } = await query('SELECT u.id,u.username,u.name,u.role,u.camp_id AS "campId",u.project_id AS "projectId",u.employee_id AS "employeeId",u.active,s.expires_at FROM public.sessions s JOIN public.users u ON u.id=s.user_id WHERE s.token=$1', [token]);
     const session = rows[0];
     if (!session || !session.active || Number(session.expires_at) < Date.now()) return res.status(401).json({ error: 'Нэвтэрнэ үү' });
     req.user = session;
@@ -55,7 +62,35 @@ async function auth(req, res, next) {
   } catch (error) { next(error); }
 }
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
-const editor = (req, res, next) => req.user.role === 'admin' || (req.params.type === 'machineLogs' && req.user.role === 'dispatcher') || (req.params.type === 'attendance' && ['hr', 'camp'].includes(req.user.role)) ? next() : res.status(403).json({ error: 'Бүртгэх эрхгүй' });
+const defaultPermissions = {
+  dispatcher: { assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
+  clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'],machineLogs:['read','create','update'] },
+  camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
+  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
+};
+async function allowed(req, page, action) {
+  if (req.user.role === 'admin') return true;
+  const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role]);
+  const permissions = rows[0]?.permissions || defaultPermissions[req.user.role] || {};
+  return Array.isArray(permissions[page]) && permissions[page].includes(action);
+}
+const editor = async (req, res, next) => {
+  try { return await allowed(req, req.params.type, req.method === 'DELETE' ? 'delete' : req.method === 'PUT' || req.method === 'PATCH' ? 'update' : 'create') ? next() : res.status(403).json({ error: 'Бүртгэх эрхгүй' }); }
+  catch (error) { next(error); }
+};
+async function audit(req, page, action, recordId, details = {}, db) {
+  await query('INSERT INTO public.audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)', [currentProject(), req.user.id, req.user.username, req.user.role, page, action, recordId || null, JSON.stringify(details)], db);
+}
+app.use('/api', (req, res, next) => {
+  if (['/login','/health'].includes(req.path)) return next();
+  auth(req, res, async () => {
+    try {
+      const projectId = req.user.role === 'admin' && req.headers['x-project-id'] ? Number(req.headers['x-project-id']) : Number(req.user.projectId);
+      if (!projectId || !(await query('SELECT id FROM public.projects WHERE id=$1 AND active=true', [projectId])).rowCount) return res.status(403).json({ error: 'Төсөл сонгоно уу' });
+      projectContext.run({ projectId }, next);
+    } catch (error) { next(error); }
+  });
+});
 
 async function validate(type, body, db) {
   const value = clean(type, body);
@@ -72,32 +107,42 @@ async function validate(type, body, db) {
   if (type === 'machineLogs' && (!await get('employees', value.employeeId, db) || !await get('equipment', value.equipmentId, db))) throw new Error('Оператор эсвэл техник олдсонгүй');
   if (type === 'machineLogs' && (Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
   if (type === 'machineLogs' && value.endKm !== undefined && Number(value.endKm) < Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
+  if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type) && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
+  if (['maintenance'].includes(type) && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
+  if (type === 'shiftOverrides') {
+    if (!await get('employees', value.replacementEmployeeId, db)) throw new Error('Орлон ажиллах ажилтан олдсонгүй');
+    if (value.originalEmployeeId && !await get('employees', value.originalEmployeeId, db)) throw new Error('Солигдох ажилтан олдсонгүй');
+    if (Number(value.originalEmployeeId) === Number(value.replacementEmployeeId)) throw new Error('Ижил ажилтан сонгож болохгүй');
+  }
+  if (type === 'mealFeedback' && value.approvedAllowance !== undefined && (!Number.isFinite(Number(value.approvedAllowance)) || Number(value.approvedAllowance) < 0)) throw new Error('Баталсан нэмэгдлийн дүн буруу байна');
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
-  if (!['employees','attendance','equipment'].includes(type)) return;
+  if (!['employees','attendance','equipment','bedAssignments'].includes(type)) return;
   const rows = await all(type, db);
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type === 'equipment' && rows.some(row => row.id !== Number(excludeId) && (value.vin && row.vin === value.vin || !value.vin && row.parkNo === value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
+  if (type === 'bedAssignments' && value.building && value.room && value.bed && rows.some(row => row.id !== Number(excludeId) && row.building === value.building && row.room === value.room && row.bed === value.bed && String(row.startDate) <= String(value.endDate || '9999-12-31') && String(value.startDate) <= String(row.endDate || '9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
 }
 async function canEditRecord(req, type, value, db) {
   if (req.user.role === 'admin') return true;
-  if (type === 'machineLogs') return req.user.role === 'dispatcher';
-  if (type === 'attendance' && req.user.role === 'hr') return true;
-  if (type === 'attendance' && req.user.role === 'camp') return Number((await get('employees', value.employeeId, db))?.campId) === Number(req.user.campId);
-  return false;
+  if (type === 'employees' && req.user.role === 'clerk') return /засвар/i.test(String(value.branch || ''));
+  if (type === 'mealFeedback' && req.user.role === 'camp' && (value.approvedAllowance !== undefined || value.hrStatus !== undefined || value.hrNote !== undefined)) return false;
+  if (req.user.role === 'camp' && ['attendance','campStays'].includes(type) && value.employeeId) return Number((await get('employees', value.employeeId, db))?.campId) === Number(req.user.campId);
+  if (req.user.role === 'camp' && value.campId) return Number(value.campId) === Number(req.user.campId);
+  return true;
 }
 async function updateEquipmentHours(log, db) {
   const equipment = await get('equipment', log.equipmentId, db);
   if (!equipment || Number(log.endHours) <= Number(equipment.currentHours || 0)) return;
   const { id, createdAt, updatedAt, ...body } = equipment;
   body.currentHours = Number(log.endHours);
-  await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2', [JSON.stringify(body), id], db);
+  await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify(body), id, currentProject()], db);
 }
-async function insert(type, value, db) {
+async function insert(type, value, db, importBatchId = null) {
   await ensureUnique(type, value, undefined, db);
-  const { rows } = await query('INSERT INTO public.records(type,body) VALUES($1,$2::jsonb) RETURNING id,body,created_at,updated_at', [type, JSON.stringify(value)], db);
+  const { rows } = await query('INSERT INTO public.records(type,body,project_id,import_batch_id) VALUES($1,$2::jsonb,$3,$4) RETURNING id,body,created_at,updated_at', [type, JSON.stringify(value), currentProject(), importBatchId], db);
   if (type === 'machineLogs') await updateEquipmentHours(value, db);
   return rowRecord(rows[0]);
 }
@@ -114,7 +159,7 @@ async function syncPlanAssignments(planId, plan, db) {
     const used = await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [row.id], db);
     if (used.rowCount) throw new Error('Гүйцэтгэл илгээгдсэн төлөвлөгөөний хуваарийг өөрчлөх боломжгүй');
   }
-  for (const row of previous) await query('DELETE FROM public.records WHERE type=$1 AND id=$2', ['assignments', row.id], db);
+  for (const row of previous) await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', ['assignments', row.id, currentProject()], db);
   for (const row of next) await insert('assignments', { ...row, planId, autoPlanId: planId }, db);
 }
 const bad = (res, error) => res.status(400).json({ error: error.message });
@@ -139,7 +184,7 @@ app.post('/api/login', async (req, res) => {
   const token = randomBytes(32).toString('hex');
   await query('INSERT INTO public.sessions(token,user_id,expires_at) VALUES($1,$2,$3)', [token, user.id, Date.now() + 7 * 86400000]);
   res.cookie('mpchr', token, { httpOnly: true, sameSite: 'strict', secure: Boolean(process.env.VERCEL || process.env.NODE_ENV === 'production'), maxAge: 7 * 86400000, path: '/' });
-  res.json({ id: user.id, username: user.username, name: user.name, role: user.role, campId: user.camp_id });
+  res.json({ id: user.id, username: user.username, name: user.name, role: user.role, campId: user.camp_id, projectId: user.project_id, employeeId: user.employee_id });
 });
 
 app.post('/api/logout', auth, async (req, res) => {
@@ -147,11 +192,11 @@ app.post('/api/logout', auth, async (req, res) => {
   res.clearCookie('mpchr', { path: '/' });
   res.json({ ok: true });
 });
-app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, username: req.user.username, name: req.user.name, role: req.user.role, campId: req.user.campId }));
+app.get('/api/me', auth, (req, res) => res.json({ id: req.user.id, username: req.user.username, name: req.user.name, role: req.user.role, campId: req.user.campId, projectId: req.user.projectId, employeeId: req.user.employeeId }));
 app.patch('/api/me/password', auth, async (req, res) => {
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
-  if (newPassword.length < 8) return res.status(400).json({ error: 'Шинэ нууц үг 8-аас дээш тэмдэгттэй байна' });
+  if (!validPassword(newPassword)) return res.status(400).json({ error: 'Нууц үг 8+ тэмдэгт, том/жижиг үсэг, тоо, тусгай тэмдэгт агуулна' });
   const user = (await query('SELECT password FROM public.users WHERE id=$1', [req.user.id])).rows[0];
   if (!user || !verify(currentPassword, user.password)) return res.status(400).json({ error: 'Одоогийн нууц үг буруу байна' });
   if (currentPassword === newPassword) return res.status(400).json({ error: 'Шинэ нууц үг өмнөхөөс өөр байна' });
@@ -161,14 +206,52 @@ app.patch('/api/me/password', auth, async (req, res) => {
   });
   res.json({ ok: true });
 });
-app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",active FROM public.users ORDER BY id')).rows));
-app.post('/api/users', auth, admin, async (req, res) => {
-  const { username, name, role, password, campId } = req.body;
-  if (!username || !name || !roles.includes(role) || String(password || '').length < 8) return res.status(400).json({ error: 'Нэр, эрх, 8+ тэмдэгттэй нууц үг оруулна уу' });
-  if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
+app.get('/api/projects', auth, admin, async (_req, res) => res.json((await query('SELECT id,name,active FROM public.projects ORDER BY id')).rows));
+app.post('/api/projects', auth, admin, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (name.length < 2 || name.length > 100) return res.status(400).json({ error: 'Төслийн нэр 2–100 тэмдэгт байна' });
   try {
-    const { rows } = await query('INSERT INTO public.users(username,name,role,password,camp_id) VALUES($1,$2,$3,$4,$5) RETURNING id', [username, name, role, hash(password), role === 'camp' ? Number(campId) : null]);
-    res.json({ id: rows[0].id, username, name, role, campId, active: true });
+    const { rows } = await query('INSERT INTO public.projects(name) VALUES($1) RETURNING id,name,active', [name]);
+    await audit(req, 'projects', 'create', rows[0].id, { name });
+    res.json(rows[0]);
+  } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'Ийм нэртэй төсөл байна' }); throw error; }
+});
+app.get('/api/permissions', auth, async (req, res) => {
+  if (req.user.role === 'admin') {
+    const rows = (await query('SELECT role,permissions FROM public.role_permissions WHERE project_id=$1', [currentProject()])).rows;
+    return res.json(Object.fromEntries(roles.map(role => [role, rows.find(row => row.role === role)?.permissions || defaultPermissions[role] || {}])));
+  }
+  res.json({ [req.user.role]: (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions || defaultPermissions[req.user.role] || {} });
+});
+app.put('/api/permissions/:role', auth, admin, async (req, res) => {
+  const role = req.params.role;
+  if (!roles.includes(role) || role === 'admin') return res.status(400).json({ error: 'Эрх буруу байна' });
+  const input = req.body?.permissions;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return res.status(400).json({ error: 'Эрхийн тохиргоо буруу байна' });
+  const actions = ['read','create','update','delete'];
+  const permissions = Object.fromEntries(Object.entries(input).filter(([page]) => types.includes(page)).map(([page, list]) => [page, Array.isArray(list) ? list.filter(action => actions.includes(action)) : []]));
+  await query('INSERT INTO public.role_permissions(project_id,role,permissions) VALUES($1,$2,$3::jsonb) ON CONFLICT(project_id,role) DO UPDATE SET permissions=$3::jsonb,updated_at=now()', [currentProject(), role, JSON.stringify(permissions)]);
+  await audit(req, 'permissions', 'update', null, { role, permissions });
+  res.json({ role, permissions });
+});
+app.get('/api/audit', auth, admin, async (req, res) => {
+  const role = String(req.query.role || '');
+  const page = String(req.query.page || '');
+  const { rows } = await query('SELECT id,username,role,page,action,record_id AS "recordId",details,created_at AS "createdAt" FROM public.audit_logs WHERE project_id=$1 AND ($2::text = \'\' OR role=$2) AND ($3::text = \'\' OR page=$3) ORDER BY id DESC LIMIT 1000', [currentProject(), role, page]);
+  res.json(rows);
+});
+app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
+app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users ORDER BY id')).rows));
+app.post('/api/users', auth, admin, async (req, res) => {
+  const { username, name, role, password, campId, projectId, employeeId } = req.body;
+  if (!username || !name || !roles.includes(role) || !validPassword(password)) return res.status(400).json({ error: 'Нэр, эрх, 8+ тэмдэгттэй том/жижиг үсэг, тоо, тэмдэгт орсон нууц үг оруулна уу' });
+  if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
+  if (!await get('employees', employeeId)) return res.status(400).json({ error: 'Ажилтан сонгоно уу' });
+  const chosenProject = role === 'admin' ? Number(projectId || currentProject()) : currentProject();
+  try {
+    const { rows } = await query('INSERT INTO public.users(username,name,role,password,camp_id,project_id,employee_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id', [username, name, role, hash(password), role === 'camp' ? Number(campId) : null, chosenProject, Number(employeeId)]);
+    await audit(req, 'users', 'create', rows[0].id, { username, role, projectId: chosenProject, employeeId });
+    res.json({ id: rows[0].id, username, name, role, campId, projectId: chosenProject, employeeId, active: true });
   } catch (error) {
     if (error.code === '23505') return res.status(409).json({ error: 'Энэ нэвтрэх нэр бүртгэлтэй байна' });
     throw error;
@@ -183,12 +266,16 @@ app.patch('/api/users/:id', auth, admin, async (req, res) => {
   const active = req.body.active === undefined ? user.active : Boolean(req.body.active);
   if (user.id === req.user.id && (!active || role !== 'admin')) return res.status(400).json({ error: 'Өөрийн админ эрхийг хаах боломжгүй' });
   if (user.id === req.user.id && req.body.password) return res.status(400).json({ error: 'Өөрийн нууц үгийг тусгай товчоор солино уу' });
-  await query('UPDATE public.users SET name=$1,role=$2,camp_id=$3,active=$4,password=$5 WHERE id=$6', [req.body.name || user.name, role, campId, active, req.body.password ? hash(req.body.password) : user.password, user.id]);
+  if (req.body.password && !validPassword(req.body.password)) return res.status(400).json({ error: 'Нууц үг 8+ тэмдэгт, том/жижиг үсэг, тоо, тусгай тэмдэгт агуулна' });
+  const employeeId = Number(req.body.employeeId ?? user.employee_id);
+  if (employeeId && !await get('employees', employeeId)) return res.status(400).json({ error: 'Ажилтан олдсонгүй' });
+  await query('UPDATE public.users SET name=$1,role=$2,camp_id=$3,active=$4,password=$5,employee_id=$7 WHERE id=$6', [req.body.name || user.name, role, campId, active, req.body.password ? hash(req.body.password) : user.password, user.id, employeeId || null]);
+  await audit(req, 'users', 'update', user.id, { role, active, employeeId });
   res.json({ ok: true });
 });
 
 app.post('/api/attendance/submit', auth, async (req, res) => {
-  if (!['admin','hr','camp'].includes(req.user.role)) return res.status(403).json({ error: 'Цаг бүртгэх эрхгүй' });
+  if (!await allowed(req, 'attendance', 'create')) return res.status(403).json({ error: 'Цаг бүртгэх эрхгүй' });
   const rows = req.body.rows;
   if (!Array.isArray(rows) || !rows.length || rows.length > 500) return res.status(400).json({ error: '1–500 ажилтан сонгоно уу' });
   try {
@@ -210,9 +297,10 @@ app.post('/api/attendance/submit', auth, async (req, res) => {
       const existing = await all('attendance', db);
       for (const value of values) {
         const old = existing.find(row => row.date === value.date && Number(row.employeeId) === Number(value.employeeId));
-        if (old) await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2', [JSON.stringify(value), old.id], db);
+        if (old) await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify(value), old.id, currentProject()], db);
         else await insert('attendance', value, db);
       }
+      await audit(req, 'attendance', 'submit', null, { count: values.length, date: values[0]?.date }, db);
     });
     res.json({ count: rows.length });
   } catch (error) { bad(res, error); }
@@ -220,6 +308,7 @@ app.post('/api/attendance/submit', auth, async (req, res) => {
 
 function visibleRecords(type,user,rows,employees) {
   if(type==='other'&&user.role!=='admin')return [];
+  if(type==='employees'&&user.role==='clerk') rows=rows.filter(row=>/засвар/i.test(String(row.branch||'')));
   if(user.role==='camp'){
     const campId=Number(user.campId);
     const employeeCamp=new Map(employees.map(row=>[row.id,Number(row.campId)]));
@@ -230,7 +319,7 @@ function visibleRecords(type,user,rows,employees) {
   }
   if(user.role!=='admin')rows=rows.map(row=>{
     const safe={...row};
-    if(type==='employees'&&user.role!=='hr'){delete safe.register;delete safe.phone;delete safe.bankAccount}
+    if(type==='employees'&&user.role!=='hr') ['register','civilId','phone','email','homeAddress','bankName','bankAccount','lookupAccount','baseSalary','socialSalary','birthDate','verificationNote'].forEach(key=>delete safe[key]);
     if(type==='equipment')['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key=>delete safe[key]);
     if(type==='plans')delete safe.unitRevenue;
     if(type==='fuel')delete safe.pricePerLiter;
@@ -238,7 +327,7 @@ function visibleRecords(type,user,rows,employees) {
   });
   return rows;
 }
-const submissionSql='SELECT s.id,s.assignment_id,s.work_date::text AS work_date,s.status,s.actual_hours::float8 AS actual_hours,s.actual_fuel::float8 AS actual_fuel,s.actual_output::float8 AS actual_output,s.note,s.submitted_by,s.submitted_at,u.name AS "submittedByName" FROM public.submissions s JOIN public.users u ON u.id=s.submitted_by ORDER BY s.submitted_at DESC';
+const submissionSql='SELECT s.id,s.assignment_id,s.work_date::text AS work_date,s.status,s.actual_hours::float8 AS actual_hours,s.actual_fuel::float8 AS actual_fuel,s.actual_output::float8 AS actual_output,s.note,s.submitted_by,s.submitted_at,u.name AS "submittedByName" FROM public.submissions s JOIN public.users u ON u.id=s.submitted_by JOIN public.records r ON r.id=s.assignment_id WHERE r.project_id=$1 ORDER BY s.submitted_at DESC';
 function visibleSubmissions(rows,user,assignments,employees){
   if(user.role!=='camp')return rows;
   const assignmentMap=new Map(assignments.map(row=>[row.id,row]));
@@ -247,19 +336,22 @@ function visibleSubmissions(rows,user,assignments,employees){
 }
 app.get('/api/bootstrap',auth,async(req,res)=>{
   const [recordResult,submissionResult,userResult]=await Promise.all([
-    query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) ORDER BY id DESC',[types]),
-    query(submissionSql),
-    req.user.role==='admin'?query('SELECT id,username,name,role,camp_id AS "campId",active FROM public.users ORDER BY id'):Promise.resolve({rows:[]})
+    query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) AND project_id=$2 ORDER BY id DESC',[types,currentProject()]),
+    query(submissionSql,[currentProject()]),
+    req.user.role==='admin'?query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users WHERE project_id=$1 OR role=$2 ORDER BY id',[currentProject(),'admin']):Promise.resolve({rows:[]})
   ]);
   const grouped=Object.fromEntries(types.map(type=>[type,[]]));
   for(const row of recordResult.rows)grouped[row.type].push(rowRecord(row));
   const employees=grouped.employees,assignments=grouped.assignments;
-  const records=Object.fromEntries(types.map(type=>[type,visibleRecords(type,req.user,grouped[type],employees)]));
-  res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows});
+  const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
+  const permissions = req.user.role==='admin' ? Object.fromEntries(types.map(type=>[type,['read','create','update','delete']])) : permissionRows[0]?.permissions || defaultPermissions[req.user.role] || {};
+  const records=Object.fromEntries(types.map(type=>[type,permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
+  res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,projectId:currentProject()});
 });
 app.get('/api/records/:type',auth,async(req,res)=>{
   const type=req.params.type;
   if(!types.includes(type))return res.status(404).end();
+  if (!await allowed(req,type,'read')) return res.status(403).json({ error: 'Харах эрхгүй' });
   const rows=await all(type);
   res.json(visibleRecords(type,req.user,rows,req.user.role==='camp'&&['attendance','assignments'].includes(type)?await all('employees'):[]));
 });
@@ -270,10 +362,12 @@ app.post('/api/records/:type', auth, editor, async (req, res) => {
     const value = await validate(type, req.body);
     if (!await canEditRecord(req, type, value)) return res.status(403).json({ error: 'Өөр camp-ийн ажилтны бүртгэл хийх эрхгүй' });
     if (type === 'plans') {
-      const plan = await withTransaction(async db => { const created = await insert(type, value, db); await syncPlanAssignments(created.id, value, db); return created; });
+      const plan = await withTransaction(async db => { const created = await insert(type, value, db); await syncPlanAssignments(created.id, value, db); await audit(req,type,'create',created.id,{name:created.name},db); return created; });
       return res.json(plan);
     }
-    res.json(await insert(type, value));
+    const created = await insert(type, value);
+    await audit(req,type,'create',created.id,{ sourceRow: created.sourceRow || null });
+    res.json(created);
   } catch (error) { bad(res, error); }
 });
 app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
@@ -282,14 +376,23 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
   const old = await get(type, id);
   if (!old) return res.status(404).json({ error: 'Бүртгэл олдсонгүй' });
   try {
-    const value = await validate(type, req.body);
+    const value = await validate(type, type==='employees'&&req.user.role==='clerk'?{...old,...req.body}:req.body);
+    if (type==='employees'&&req.user.role==='clerk') {
+      const operational=['shiftGroup','rotationPattern','shiftStart','status','campId','notes'];
+      const forbidden=Object.keys(value).filter(key=>!operational.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key]));
+      if (forbidden.length) throw new Error('Клерк зөвхөн ээлж, төлөв, Camp болон тэмдэглэл засна');
+    }
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
     if (type === 'plans') await withTransaction(async db => {
-      await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3', [JSON.stringify(value), type, Number(id)], db);
+      await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4', [JSON.stringify(value), type, Number(id), currentProject()], db);
       await syncPlanAssignments(id, value, db);
+      await audit(req,type,'update',Number(id),{ changedFields:Object.keys(value).filter(key=>JSON.stringify(value[key])!==JSON.stringify(old[key])) },db);
     });
-    else await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3', [JSON.stringify(value), type, Number(id)]);
+    else {
+      await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4', [JSON.stringify(value), type, Number(id), currentProject()]);
+      await audit(req,type,'update',Number(id),{ changedFields:Object.keys(value).filter(key=>JSON.stringify(value[key])!==JSON.stringify(old[key])) });
+    }
     if (type === 'machineLogs') await updateEquipmentHours(value);
     res.json(await get(type, id));
   } catch (error) { bad(res, error); }
@@ -307,10 +410,11 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
         for (const row of linked) {
           const used = await query('SELECT id FROM public.submissions WHERE assignment_id=$1 LIMIT 1', [row.id], db);
           if (Number(row.autoPlanId) !== Number(id) || used.rowCount) throw new Error('Энэ төлөвлөгөөний ажил эсвэл гүйцэтгэлийн бүртгэл байна');
-          await query('DELETE FROM public.records WHERE type=$1 AND id=$2', ['assignments', row.id], db);
+          await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', ['assignments', row.id, currentProject()], db);
         }
       }
-      await query('DELETE FROM public.records WHERE type=$1 AND id=$2', [type, Number(id)], db);
+      await query('DELETE FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', [type, Number(id), currentProject()], db);
+      await audit(req,type,'delete',Number(id),{ deletedFields:Object.keys(old).filter(key=>!['createdAt','updatedAt'].includes(key)) },db);
     });
     res.json({ ok: true });
   } catch (error) { bad(res, error); }
@@ -322,18 +426,68 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
   const rows = req.body.rows;
   if (!Array.isArray(rows) || rows.length > 2000) return res.status(400).json({ error: '2000 хүртэл мөр импортлох боломжтой' });
   try {
+    let batchId;
     await withTransaction(async db => {
+      const batch = await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),type,String(req.body.filename || '').slice(0,200),rows.length,req.user.id],db);
+      batchId = batch.rows[0].id;
       for (const [index, row] of rows.entries()) {
         try {
           const value = await validate(type, row, db);
           if (!await canEditRecord(req, type, value, db)) throw new Error('Өөр camp-ийн ажилтан');
-          const record = await insert(type, value, db);
+          const record = await insert(type, value, db, batchId);
           if (type === 'plans') await syncPlanAssignments(record.id, value, db);
         } catch (error) { throw new Error(`${index + 2}-р мөр: ${error.message}`); }
       }
+      await audit(req,type,'import',null,{ batchId, count:rows.length, filename:String(req.body.filename || '').slice(0,200) },db);
     });
-    res.json({ count: rows.length });
+    res.json({ count: rows.length, batchId });
   } catch (error) { bad(res, error); }
+});
+app.post('/api/imports/:id/undo', auth, admin, async (req, res) => {
+  try {
+    const batch = (await query('SELECT * FROM public.import_batches WHERE id=$1 AND project_id=$2 AND undone_at IS NULL', [Number(req.params.id), currentProject()])).rows[0];
+    if (!batch) return res.status(404).json({ error: 'Импорт олдсонгүй эсвэл буцаагдсан байна' });
+    if (batch.type !== 'employees' && batch.type !== 'equipment') throw new Error('Энэ төрлийн импортыг автоматаар буцаах боломжгүй');
+    const count = await withTransaction(async db => {
+      const linked = await query(`SELECT count(*)::int AS count FROM public.records r JOIN public.records e ON e.import_batch_id=$1 AND e.project_id=$2 WHERE r.project_id=$2 AND (r.body->>'employeeId'=e.id::text OR r.body->>'equipmentId'=e.id::text)`, [batch.id,currentProject()],db);
+      if (linked.rows[0].count) throw new Error('Импортолсон мөрүүдийг бусад бүртгэл ашиглаж байгаа тул буцаах боломжгүй');
+      const deleted = await query('DELETE FROM public.records WHERE import_batch_id=$1 AND project_id=$2 RETURNING id', [batch.id,currentProject()],db);
+      await query('UPDATE public.import_batches SET undone_at=now() WHERE id=$1', [batch.id],db);
+      await audit(req,batch.type,'import_undo',null,{batchId:batch.id,count:deleted.rowCount},db);
+      return deleted.rowCount;
+    });
+    res.json({count});
+  } catch (error) { bad(res,error); }
+});
+app.post('/api/admin/replace-project-data', auth, admin, async (req, res) => {
+  try {
+    const project = (await query('SELECT id,name FROM public.projects WHERE id=$1', [currentProject()])).rows[0];
+    if (!project || req.body?.confirm !== project.name) throw new Error('Төслийн нэрээр баталгаажуулна уу');
+    const rows = req.body?.employees;
+    if (!Array.isArray(rows) || rows.length < 1 || rows.length > 2000) throw new Error('Ажилтны өгөгдөл 1–2000 мөр байна');
+    const values = [];
+    for (const [index,row] of rows.entries()) {
+      try { values.push(await validate('employees',row)); }
+      catch (error) { throw new Error(`${index+1}-р мөр: ${error.message}`); }
+    }
+    if (new Set(values.map(row=>String(row.register).toUpperCase())).size!==values.length) throw new Error('Импортод давхардсан регистр байна');
+    const result = await withTransaction(async db => {
+      const previous = (await query('SELECT type,count(*)::int AS count FROM public.records WHERE project_id=$1 OR project_id IS NULL GROUP BY type', [currentProject()],db)).rows;
+      await query('DELETE FROM public.submissions s USING public.records r WHERE s.assignment_id=r.id AND (r.project_id=$1 OR r.project_id IS NULL)', [currentProject()],db);
+      await query('DELETE FROM public.records WHERE project_id=$1 OR project_id IS NULL', [currentProject()],db);
+      await query('DELETE FROM public.audit_logs WHERE project_id=$1', [currentProject()],db);
+      await query('DELETE FROM public.import_batches WHERE project_id=$1', [currentProject()],db);
+      await query('DELETE FROM public.sessions WHERE user_id IN (SELECT id FROM public.users WHERE role<>$1 AND project_id=$2)', ['admin',currentProject()],db);
+      await query('DELETE FROM public.users WHERE role<>$1 AND project_id=$2', ['admin',currentProject()],db);
+      await query('DELETE FROM public.role_permissions WHERE project_id=$1', [currentProject()],db);
+      const batch = (await query('INSERT INTO public.import_batches(project_id,type,filename,row_count,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id', [currentProject(),'employees',String(req.body.filename||'ЗӨВ ШИЙТ.xls'),values.length,req.user.id],db)).rows[0];
+      await query('INSERT INTO public.records(type,body,project_id,import_batch_id) SELECT $1,items.body,$2,$3 FROM jsonb_array_elements($4::jsonb) AS items(body)', ['employees',currentProject(),batch.id,JSON.stringify(values)],db);
+      await audit(req,'projects','reset',project.id,{previous,importedEmployees:values.length,source:String(req.body.filename||'')},db);
+      await audit(req,'employees','import',null,{batchId:batch.id,count:values.length},db);
+      return { previous, importedEmployees:values.length, batchId:batch.id };
+    });
+    res.json(result);
+  } catch (error) { bad(res,error); }
 });
 
 app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
@@ -356,21 +510,23 @@ app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
         const value = await validate('equipment', record, db);
         const old = existing.get(String(record.vin).toUpperCase());
         if (old) {
-          await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2', [JSON.stringify({ ...value, fuelRate: old.fuelRate || value.fuelRate, notes: old.notes || value.notes }), old.id], db);
+          await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE id=$2 AND project_id=$3', [JSON.stringify({ ...value, fuelRate: old.fuelRate || value.fuelRate, notes: old.notes || value.notes }), old.id, currentProject()], db);
           updated++;
         } else { const created = await insert('equipment', value, db); existing.set(String(record.vin).toUpperCase(), created); added++; }
       }
+      await audit(req,'equipment','import',null,{added,updated,totalRows},db);
     });
     res.json({ added, updated, totalRows });
   } catch (error) { bad(res, error); }
 });
 
 app.get('/api/submissions',auth,async(req,res)=>{
-  const rows=(await query(submissionSql)).rows;
+  const rows=(await query(submissionSql,[currentProject()])).rows;
   if(req.user.role!=='camp')return res.json(rows);
   res.json(visibleSubmissions(rows,req.user,await all('assignments'),await all('employees')));
 });
 app.post('/api/submissions', auth, async (req, res) => {
+  if (!await allowed(req,'assignments','update')) return res.status(403).json({error:'Гүйцэтгэл илгээх эрхгүй'});
   const { assignmentId, status, actualHours, actualFuel, actualOutput, note } = req.body;
   const task = await get('assignments', assignmentId);
   if (!task) return res.status(404).json({ error: 'Даалгавар олдсонгүй' });
@@ -382,10 +538,11 @@ app.post('/api/submissions', auth, async (req, res) => {
     VALUES($1,$2,$3,$4,$5,$6,$7,$8)
     ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=EXCLUDED.status,actual_hours=EXCLUDED.actual_hours,actual_fuel=EXCLUDED.actual_fuel,actual_output=EXCLUDED.actual_output,note=EXCLUDED.note,submitted_by=EXCLUDED.submitted_by,submitted_at=now()`,
   [task.id, task.date, status, ...values, String(note || ''), req.user.id]);
+  await audit(req,'assignments','submit',task.id,{status,actualHours:values[0],actualFuel:values[1],actualOutput:values[2]});
   res.json({ ok: true });
 });
 app.post('/api/submissions/batch', auth, async (req, res) => {
-  if (!['admin','dispatcher','clerk','camp'].includes(req.user.role)) return res.status(403).json({ error: 'Гүйцэтгэл илгээх эрхгүй' });
+  if (!await allowed(req,'assignments','update')) return res.status(403).json({ error: 'Гүйцэтгэл илгээх эрхгүй' });
   const rows = req.body?.rows;
   if (!Array.isArray(rows) || !rows.length || rows.length > 200) return res.status(400).json({ error: '1–200 ажлын гүйцэтгэл сонгоно уу' });
   try {
@@ -404,6 +561,7 @@ app.post('/api/submissions/batch', auth, async (req, res) => {
           VALUES($1,$2,$3,$4,$5,$6,$7,$8)
           ON CONFLICT(assignment_id,work_date) DO UPDATE SET status=EXCLUDED.status,actual_hours=EXCLUDED.actual_hours,actual_fuel=EXCLUDED.actual_fuel,actual_output=EXCLUDED.actual_output,note=EXCLUDED.note,submitted_by=EXCLUDED.submitted_by,submitted_at=now()`,
         [task.id,task.date,row.status,...numbers,String(row.note || ''),req.user.id],db);
+        await audit(req,'assignments','submit',task.id,{status:row.status,actualHours:numbers[0],actualFuel:numbers[1],actualOutput:numbers[2]},db);
       }
     });
     res.json({ count: rows.length });

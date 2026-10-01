@@ -1,5 +1,5 @@
 export const roles = ['admin', 'dispatcher', 'clerk', 'camp', 'hr'];
-export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'assignments', 'fuel', 'other', 'machineLogs'];
+export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments'];
 export const required = {
   employees: ['lastName', 'firstName', 'register', 'position'],
   attendance: ['date','employeeId','status'],
@@ -11,9 +11,17 @@ export const required = {
   fuel: ['date', 'kind', 'liters'],
   other: ['date', 'name', 'amount'],
   machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours'],
+  guests: ['name','arrivalDate'],
+  campStays: ['date','category','count'],
+  maintenance: ['date','equipmentId','reason','startTime'],
+  travelExpenses: ['date','employeeId','amount'],
+  shiftOverrides: ['date','replacementEmployeeId','reason'],
+  mealMenus: ['date','mealType','name'],
+  mealFeedback: ['date','employeeId','comment'],
+  bedAssignments: ['employeeId','startDate'],
 };
 export const permitted = {
-  employees: ['lastName','firstName','register','phone','bankAccount','position','campId','shiftStart','shiftGroup','status','notes'],
+  employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','status','notes','sourceSheet','sourceRow'],
   attendance: ['date','employeeId','status','plannedHours','actualHours','campId','notes'],
   equipment: ['parkNo','kind','brand','model','vin','plateNo','site','warehouseId','owner','currentHours','fuelRate','status','availability','year','sourceStatus','contractNo','contractCompany','unitPriceMnt','currency','warranty','certificate','customsDocument','passport','sourceSheet','sourceRow','sourceData','notes'],
   camps: ['name','location','capacity','workType','manager','notes'],
@@ -23,4 +31,12 @@ export const permitted = {
   fuel: ['date','kind','equipmentId','liters','pricePerLiter','supplier','notes'],
   other: ['date','name','category','amount','notes'],
   machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours','startKm','endKm','startTime','endTime','stopMinutes','stopReason','operatorConfirmed','masterConfirmed','dispatcherChecked','fuelUsed','notes'],
+  guests: ['name','organization','phone','register','arrivalDate','departureDate','purpose','campId','notes'],
+  campStays: ['date','category','employeeId','guestId','campId','count','breakfast','lunch','dinner','mealRate','lodgingRate','rentalCompany','notes'],
+  maintenance: ['date','equipmentId','reason','startTime','endTime','minutes','status','notes'],
+  travelExpenses: ['date','employeeId','amount','paid','route','notes'],
+  shiftOverrides: ['date','originalEmployeeId','replacementEmployeeId','shift','reason','approvedBy','notes'],
+  mealMenus: ['date','mealType','name','ingredients','notes'],
+  mealFeedback: ['date','employeeId','mealType','comment','requestedAllowance','approvedAllowance','hrStatus','hrNote','notes'],
+  bedAssignments: ['employeeId','campId','building','room','bed','startDate','endDate','notes'],
 };
