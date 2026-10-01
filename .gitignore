@@ -4,3 +4,5 @@ data/
 .env*
 .vercel/
 .DS_Store
+deliverables/
+scripts/build_user_inputs_pdf.py
