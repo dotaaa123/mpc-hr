@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { parseAllData } from './allData.js';
-import { buildPlanSchedule } from './planSchedule.js';
+import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 
@@ -77,15 +77,26 @@ function validate(type, body) {
   if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';}
-  if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'));
+  if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'),all('attendance'),all('shiftOverrides'));
   if (type==='assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type==='assignments' && value.employeeId && !get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
+  if (type==='assignments'&&value.employeeId) assertAssignable(get('employees',value.employeeId),value.date,value.shift,all('attendance'),all('shiftOverrides'));
   if (type==='assignments' && value.equipmentId && !get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
   if (type==='assignments' && value.planId && !get('plans',value.planId)) throw new Error('Төлөвлөгөө олдсонгүй');
   if (type==='machineLogs' && (!get('employees',value.employeeId) || !get('equipment',value.equipmentId))) throw new Error('Оператор эсвэл техник олдсонгүй');
   if (type==='machineLogs' && (Number(value.endHours)<Number(value.startHours) || Number(value.startHours)<0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
   if (type==='machineLogs' && value.endKm!==undefined && Number(value.endKm)<Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type)&&value.employeeId&&!get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
+  if (type==='campStays') {
+    if(!get('camps',value.campId)) throw new Error('Camp сонгоно уу');
+    if(!['employee','guest','rental'].includes(value.category)||!Number.isInteger(Number(value.count))||Number(value.count)<1) throw new Error('Хоногийн ангилал эсвэл хүний тоо буруу байна');
+    if(value.category==='employee'&&(!value.employeeId||Number(value.count)!==1)) throw new Error('Үндсэн ажилтныг нэг бүрчлэн сонгоно уу');
+    if(value.category==='guest'&&(!value.guestId||Number(value.count)!==1||!get('guests',value.guestId))) throw new Error('Зочныг зочдын бүртгэлээс сонгоно уу');
+    if(value.category==='employee'&&Number(get('employees',value.employeeId)?.campId)!==Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
+    if(value.category==='guest'&&Number(get('guests',value.guestId)?.campId)!==Number(value.campId)) throw new Error('Зочин сонгосон Camp-д харьяалагдахгүй байна');
+    if(value.category==='rental'&&(value.employeeId||value.guestId)) throw new Error('Түрээсийн ажилтныг хүний тоогоор бүртгэнэ');
+    if(['breakfast','lunch','dinner','mealRate','lodgingRate'].some(key=>!Number.isFinite(Number(value[key]||0))||Number(value[key]||0)<0)) throw new Error('Хоол, хоногийн тоо болон үнэ 0-ээс бага байж болохгүй');
+  }
   if (['mealMenus','mealFeedback','bedAssignments'].includes(type)&&!get('camps',value.campId)) throw new Error('Camp сонгоно уу');
   if (type==='mealFeedback'&&Number(get('employees',value.employeeId)?.campId)!==Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
   if (type==='bedAssignments'&&value.endDate&&value.endDate<value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
@@ -101,6 +112,8 @@ function ensureUnique(type,value,excludeId) {
   if (type==='employees' && all(type).some(row=>row.id!==Number(excludeId)&&row.register===value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type==='attendance' && all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type==='equipment' && all(type).some(row=>row.id!==Number(excludeId)&&(value.vin&&row.vin===value.vin||!value.vin&&row.parkNo===value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
+  if (type==='campStays'&&all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&(value.employeeId&&Number(row.employeeId)===Number(value.employeeId)||value.guestId&&Number(row.guestId)===Number(value.guestId)))) throw new Error('Энэ хүн тухайн өдөр camp-д бүртгэлтэй байна');
+  if (type==='assignments' && all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&(value.employeeId&&Number(row.employeeId)===Number(value.employeeId)||row.shift===value.shift&&value.equipmentId&&Number(row.equipmentId)===Number(value.equipmentId)))) throw new Error('Ажилтан энэ өдөрт эсвэл техник энэ ээлжид өөр ажилд оноогдсон байна');
   if (type==='bedAssignments'&&all(type).some(row=>row.id!==Number(excludeId)&&Number(row.employeeId)===Number(value.employeeId)&&String(row.startDate)<=String(value.endDate||'9999-12-31')&&String(value.startDate)<=String(row.endDate||'9999-12-31'))) throw new Error('Ажилтан тухайн хугацаанд өөр оронд бүртгэлтэй байна');
   if (type==='bedAssignments'&&value.building&&value.room&&value.bed&&all(type).some(row=>row.id!==Number(excludeId)&&Number(row.campId)===Number(value.campId)&&row.building===value.building&&row.room===value.room&&row.bed===value.bed&&String(row.startDate)<=String(value.endDate||'9999-12-31')&&String(value.startDate)<=String(row.endDate||'9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
 }
@@ -124,9 +137,9 @@ function insert(type,value) {
 function syncPlanAssignments(planId,plan) {
   const assignments=all('assignments');
   const previous=assignments.filter(row=>Number(row.autoPlanId)===Number(planId));
-  const next=buildPlanSchedule(plan,all('employees'),all('equipment'));
+  const next=buildPlanSchedule(plan,all('employees'),all('equipment'),all('attendance'),all('shiftOverrides'));
   const other=assignments.filter(row=>Number(row.autoPlanId)!==Number(planId));
-  for(const row of next){const conflict=other.find(item=>item.date===row.date&&item.shift===row.shift&&(row.employeeId&&Number(item.employeeId)===Number(row.employeeId)||row.equipmentId&&Number(item.equipmentId)===Number(row.equipmentId)));if(conflict)throw new Error(`${row.date}-ны ээлжид сонгосон ажилтан эсвэл техник өөр ажилд оноогдсон байна`)}
+  for(const row of next){const conflict=other.find(item=>item.date===row.date&&(row.employeeId&&Number(item.employeeId)===Number(row.employeeId)||item.shift===row.shift&&row.equipmentId&&Number(item.equipmentId)===Number(row.equipmentId)));if(conflict)throw new Error(`${row.date}-ны ажилтан эсвэл техник өөр ажилд оноогдсон байна`)}
   if (previous.some(row=>row.shiftOverrideId)) throw new Error('Ээлж солигдсон төлөвлөгөөг эхлээд ээлжийн өөрчлөлтөөс чөлөөлнө үү');
   if (previous.some(row=>db.prepare('SELECT id FROM submissions WHERE assignment_id=?').get(row.id))) throw new Error('Гүйцэтгэл илгээгдсэн төлөвлөгөөний хуваарийг өөрчлөх боломжгүй');
   for (const row of previous) db.prepare('DELETE FROM records WHERE type=? AND id=? AND project_id=?').run('assignments',row.id,currentProject());
@@ -141,7 +154,7 @@ function applyShiftOverride(overrideId,value) {
   const assignments=all('assignments');
   const targets=assignments.filter(row=>row.date===value.date&&Number(row.employeeId)===Number(value.originalEmployeeId)&&(!value.shift||row.shift===value.shift));
   for(const target of targets){
-    if(assignments.some(row=>row.id!==target.id&&row.date===target.date&&row.shift===target.shift&&Number(row.employeeId)===Number(replacement.id)))throw new Error('Орлон ажиллах ажилтан тухайн ээлжид өөр ажилд оноогдсон байна');
+    if(assignments.some(row=>row.id!==target.id&&row.date===target.date&&Number(row.employeeId)===Number(replacement.id)))throw new Error('Орлон ажиллах ажилтан тухайн өдөр өөр ажилд оноогдсон байна');
     if(db.prepare('SELECT id FROM submissions WHERE assignment_id=?').get(target.id))throw new Error('Гүйцэтгэл илгээгдсэн ажлын ээлжийг солих боломжгүй');
     const {id,createdAt,updatedAt,...body}=target;
     body.originalEmployeeId=Number(value.originalEmployeeId);body.employeeId=replacement.id;body.campId=replacement.campId||body.campId;body.shiftOverrideId=Number(overrideId);

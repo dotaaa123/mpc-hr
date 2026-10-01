@@ -1,9 +1,17 @@
+import { rosterState } from '../shared/rotation.js';
+
 const ids = value => {
   const items = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
   return items.filter(item => item !== '' && item !== null && item !== undefined).map(Number);
 };
 
-export function buildPlanSchedule(plan, employees, equipment) {
+export function assertAssignable(employee,date,shift,attendance=[],overrides=[]) {
+  if(!['day','night'].includes(shift))throw new Error('Өдрийн эсвэл шөнийн ээлж сонгоно уу');
+  const state=rosterState(employee,date,attendance,overrides);
+  if(!state.available||state.shift&&state.shift!==shift)throw new Error(`${date}: ${employee.lastName} ${employee.firstName} ${shift==='night'?'шөнийн':'өдрийн'} ээлжид ажиллах боломжгүй (${state.label})`);
+}
+
+export function buildPlanSchedule(plan, employees, equipment, attendance = [], overrides = []) {
   const employeeIds = ids(plan.employeeIds);
   const equipmentIds = ids(plan.equipmentIds);
   if (employeeIds.some(id => !Number.isInteger(id) || id < 1) || new Set(employeeIds).size !== employeeIds.length) throw new Error('Ажилтны сонголт давхардсан эсвэл буруу байна');
@@ -37,6 +45,7 @@ export function buildPlanSchedule(plan, employees, equipment) {
       const employeeId=employeeIds[index];
       const equipmentId=equipmentIds[index];
       const employee=people.get(employeeId);
+      if(employee)assertAssignable(employee,date,plan.shift,attendance,overrides);
       assignments.push({date,title:plan.name,site:plan.site,shift:plan.shift,employeeId,equipmentId,campId:employee?.campId,
         plannedHours:employeeId?Number(plan.plannedHours || 12):0,
         plannedFuel:equipmentId?Number(plan.plannedFuel || 0)/days/Math.max(1,equipmentIds.length):0,

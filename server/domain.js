@@ -12,7 +12,7 @@ export const required = {
   other: ['date', 'name', 'amount'],
   machineLogs: ['date','equipmentId','employeeId','shiftGroup','startHours','endHours'],
   guests: ['name','arrivalDate'],
-  campStays: ['date','category','count'],
+  campStays: ['date','campId','category','count'],
   maintenance: ['date','equipmentId','reason','startTime'],
   travelExpenses: ['date','employeeId','amount'],
   shiftOverrides: ['date','replacementEmployeeId','reason'],
