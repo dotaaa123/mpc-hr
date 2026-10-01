@@ -66,7 +66,7 @@ async function auth(req, res, next) {
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
 const defaultPermissions = {
   dispatcher: { assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
-  clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'],machineLogs:['read','create','update'] },
+  clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
   hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
 };
@@ -133,6 +133,7 @@ async function ensureUnique(type, value, excludeId, db) {
 async function canEditRecord(req, type, value, db) {
   if (req.user.role === 'admin') return true;
   if (type === 'employees' && req.user.role === 'clerk') return /засвар/i.test(String(value.branch || ''));
+  if (req.user.role === 'clerk' && ['assignments','machineLogs'].includes(type)) return /засвар/i.test(String((await get('employees',value.employeeId,db))?.branch||''));
   if (type === 'mealFeedback' && req.user.role === 'camp' && (value.approvedAllowance !== undefined || value.hrStatus !== undefined || value.hrNote !== undefined)) return false;
   if (req.user.role === 'camp' && ['attendance','campStays'].includes(type) && value.employeeId) return Number((await get('employees', value.employeeId, db))?.campId) === Number(req.user.campId);
   if (req.user.role === 'camp' && value.campId) return Number(value.campId) === Number(req.user.campId);
@@ -377,6 +378,7 @@ app.post('/api/attendance/submit', auth, async (req, res) => {
 function visibleRecords(type,user,rows,employees) {
   if(type==='other'&&user.role!=='admin')return [];
   if(type==='employees'&&user.role==='clerk') rows=rows.filter(row=>/засвар/i.test(String(row.branch||'')));
+  if(user.role==='clerk'&&['assignments','machineLogs'].includes(type)){const repairIds=new Set(employees.filter(row=>/засвар/i.test(String(row.branch||''))).map(row=>row.id));rows=rows.filter(row=>repairIds.has(Number(row.employeeId)))}
   if(user.role==='camp'){
     const campId=Number(user.campId);
     const employeeCamp=new Map(employees.map(row=>[row.id,Number(row.campId)]));
@@ -397,6 +399,7 @@ function visibleRecords(type,user,rows,employees) {
 }
 const submissionSql='SELECT s.id,s.assignment_id,s.work_date::text AS work_date,s.status,s.actual_hours::float8 AS actual_hours,s.actual_fuel::float8 AS actual_fuel,s.actual_output::float8 AS actual_output,s.note,s.submitted_by,s.submitted_at,u.name AS "submittedByName" FROM public.submissions s JOIN public.users u ON u.id=s.submitted_by JOIN public.records r ON r.id=s.assignment_id WHERE r.project_id=$1 ORDER BY s.submitted_at DESC';
 function visibleSubmissions(rows,user,assignments,employees){
+  if(user.role==='clerk'){const repairIds=new Set(employees.filter(row=>/засвар/i.test(String(row.branch||''))).map(row=>row.id));const assignmentMap=new Map(assignments.map(row=>[row.id,row]));return rows.filter(row=>repairIds.has(Number(assignmentMap.get(row.assignment_id)?.employeeId)))}
   if(user.role!=='camp')return rows;
   const assignmentMap=new Map(assignments.map(row=>[row.id,row]));
   const employeeCamp=new Map(employees.map(row=>[row.id,Number(row.campId)]));
@@ -421,7 +424,7 @@ app.get('/api/records/:type',auth,async(req,res)=>{
   if(!types.includes(type))return res.status(404).end();
   if (!await allowed(req,type,'read')) return res.status(403).json({ error: 'Харах эрхгүй' });
   const rows=await all(type);
-  res.json(visibleRecords(type,req.user,rows,req.user.role==='camp'&&['attendance','assignments'].includes(type)?await all('employees'):[]));
+  res.json(visibleRecords(type,req.user,rows,['camp','clerk'].includes(req.user.role)&&['attendance','assignments','machineLogs'].includes(type)?await all('employees'):[]));
 });
 app.post('/api/records/:type', auth, editor, async (req, res) => {
   const type = req.params.type;
@@ -586,7 +589,7 @@ app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
 
 app.get('/api/submissions',auth,async(req,res)=>{
   const rows=(await query(submissionSql,[currentProject()])).rows;
-  if(req.user.role!=='camp')return res.json(rows);
+  if(!['camp','clerk'].includes(req.user.role))return res.json(rows);
   res.json(visibleSubmissions(rows,req.user,await all('assignments'),await all('employees')));
 });
 app.post('/api/submissions', auth, async (req, res) => {
@@ -595,6 +598,7 @@ app.post('/api/submissions', auth, async (req, res) => {
   const task = await get('assignments', assignmentId);
   if (!task) return res.status(404).json({ error: 'Даалгавар олдсонгүй' });
   if (req.user.role === 'camp' && Number(task.campId) !== Number(req.user.campId) && Number((await get('employees', task.employeeId))?.campId) !== Number(req.user.campId)) return res.status(403).json({ error: 'Өөр camp-ийн даалгавар илгээх эрхгүй' });
+  if (req.user.role === 'clerk' && !await canEditRecord(req,'assignments',task)) return res.status(403).json({error:'Клерк зөвхөн засварын ажилтны ажлыг шалгана'});
   if (!['done','not_done'].includes(status)) return res.status(400).json({ error: 'Төлөв сонгоно уу' });
   const values = [actualHours, actualFuel, actualOutput].map(value => Number(value || 0));
   if (values.some(value => !Number.isFinite(value) || value < 0)) return res.status(400).json({ error: 'Бодит утга 0-ээс бага байж болохгүй' });
@@ -618,6 +622,7 @@ app.post('/api/submissions/batch', auth, async (req, res) => {
         if (seen.has(task.id)) throw new Error('Ажил давхар сонгогдсон байна');
         seen.add(task.id);
         if (req.user.role === 'camp' && Number(task.campId) !== Number(req.user.campId) && Number((await get('employees', task.employeeId, db))?.campId) !== Number(req.user.campId)) throw new Error('Өөр camp-ийн ажил илгээх эрхгүй');
+        if (req.user.role === 'clerk' && !await canEditRecord(req,'assignments',task,db)) throw new Error('Клерк зөвхөн засварын ажилтны ажлыг шалгана');
         if (!['done','not_done'].includes(row.status)) throw new Error('Ажил бүрт хийсэн эсэхийг сонгоно уу');
         const numbers = [row.actualHours,row.actualFuel,row.actualOutput].map(value => Number(value || 0));
         if (numbers.some(value => !Number.isFinite(value) || value < 0)) throw new Error('Бодит утга 0-ээс бага байж болохгүй');

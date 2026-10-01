@@ -60,7 +60,7 @@ function auth(req,res,next) {
   req.user=session; next();
 }
 const admin = (req,res,next) => req.user.role==='admin' ? next() : res.status(403).json({error:'Зөвхөн админ эрхтэй'});
-const defaultPermissions={dispatcher:{assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'],machineLogs:['read','create','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read']}};
+const defaultPermissions={dispatcher:{assignments:['read','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read']}};
 const permissionPages=[...types,'documents'];
 const permissionsFor=user=>user.role==='admin'?Object.fromEntries(types.map(type=>[type,['read','create','update','delete']])):JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions || JSON.stringify(defaultPermissions[user.role] || {}));
 const allowed=(req,page,action)=>Boolean(permissionsFor(req.user)[page]?.includes(action));
@@ -99,6 +99,7 @@ function ensureUnique(type,value,excludeId) {
 function canEditRecord(req,type,value) {
   if (req.user.role==='admin') return true;
   if (type==='employees'&&req.user.role==='clerk') return /засвар/i.test(String(value.branch||''));
+  if (req.user.role==='clerk'&&['assignments','machineLogs'].includes(type)) return /засвар/i.test(String(get('employees',value.employeeId)?.branch||''));
   if (type==='mealFeedback'&&req.user.role==='camp'&&(value.approvedAllowance!==undefined||value.hrStatus!==undefined||value.hrNote!==undefined)) return false;
   if (req.user.role==='camp'&&['attendance','campStays'].includes(type)&&value.employeeId) return Number(get('employees',value.employeeId)?.campId)===Number(req.user.campId);
   if (req.user.role==='camp'&&value.campId) return Number(value.campId)===Number(req.user.campId);
@@ -263,6 +264,7 @@ app.post('/api/attendance/submit',auth,(req,res) => {
 function visibleRecords(type,user,rows,employees) {
   if(type==='other'&&user.role!=='admin')return [];
   if(type==='employees'&&user.role==='clerk')rows=rows.filter(row=>/засвар/i.test(String(row.branch||'')));
+  if(user.role==='clerk'&&['assignments','machineLogs'].includes(type)){const repairIds=new Set(employees.filter(row=>/засвар/i.test(String(row.branch||''))).map(row=>row.id));rows=rows.filter(row=>repairIds.has(Number(row.employeeId)))}
   if(user.role==='camp'){
     const campId=Number(user.campId);
     if(type==='employees')rows=rows.filter(row=>Number(row.campId)===campId);
@@ -282,6 +284,7 @@ function visibleRecords(type,user,rows,employees) {
 }
 function submissionsForUser(user,assignments,employees) {
   let rows=db.prepare('SELECT s.*,u.name AS submittedByName FROM submissions s JOIN users u ON u.id=s.submitted_by JOIN records r ON r.id=s.assignment_id WHERE r.project_id=? ORDER BY s.submitted_at DESC').all(currentProject());
+  if(user.role==='clerk'){const repairIds=new Set(employees.filter(row=>/засвар/i.test(String(row.branch||''))).map(row=>row.id));rows=rows.filter(row=>repairIds.has(Number(assignments.find(task=>task.id===row.assignment_id)?.employeeId)))}
   if(user.role==='camp')rows=rows.filter(row=>{const task=assignments.find(a=>a.id===row.assignment_id);return task&&(Number(task.campId)===Number(user.campId)||Number(employees.find(e=>e.id===Number(task.employeeId))?.campId)===Number(user.campId))});
   return rows;
 }
@@ -400,6 +403,7 @@ app.post('/api/submissions',auth,(req,res) => {
   const task=get('assignments',assignmentId);
   if (!task) return res.status(404).json({error:'Даалгавар олдсонгүй'});
   if (req.user.role==='camp'&&Number(task.campId)!==Number(req.user.campId)&&Number(get('employees',task.employeeId)?.campId)!==Number(req.user.campId)) return res.status(403).json({error:'Өөр camp-ийн даалгавар илгээх эрхгүй'});
+  if (req.user.role==='clerk'&&!canEditRecord(req,'assignments',task)) return res.status(403).json({error:'Клерк зөвхөн засварын ажилтны ажлыг шалгана'});
   if (!['done','not_done'].includes(status)) return res.status(400).json({error:'Төлөв сонгоно уу'});
   const values=[actualHours,actualFuel,actualOutput].map(v=>Number(v || 0));
   if (values.some(v=>!Number.isFinite(v) || v<0)) return res.status(400).json({error:'Бодит утга 0-ээс бага байж болохгүй'});
@@ -418,6 +422,7 @@ app.post('/api/submissions/batch',auth,(req,res) => {
       const task=get('assignments',row.assignmentId);
       if(!task)throw new Error('Ажлын хуваарь олдсонгүй');
       if(req.user.role==='camp'&&Number(task.campId)!==Number(req.user.campId)&&Number(get('employees',task.employeeId)?.campId)!==Number(req.user.campId))throw new Error('Өөр camp-ийн ажил илгээх эрхгүй');
+      if(req.user.role==='clerk'&&!canEditRecord(req,'assignments',task))throw new Error('Клерк зөвхөн засварын ажилтны ажлыг шалгана');
       if(!['done','not_done'].includes(row.status))throw new Error('Ажил бүрт хийсэн эсэхийг сонгоно уу');
       const numbers=[row.actualHours,row.actualFuel,row.actualOutput].map(value=>Number(value||0));
       if(numbers.some(value=>!Number.isFinite(value)||value<0))throw new Error('Бодит утга 0-ээс бага байж болохгүй');
