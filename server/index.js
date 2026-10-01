@@ -86,23 +86,31 @@ function validate(type, body) {
   if (type==='machineLogs' && (Number(value.endHours)<Number(value.startHours) || Number(value.startHours)<0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
   if (type==='machineLogs' && value.endKm!==undefined && Number(value.endKm)<Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type)&&value.employeeId&&!get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
+  if (['mealMenus','mealFeedback','bedAssignments'].includes(type)&&!get('camps',value.campId)) throw new Error('Camp сонгоно уу');
+  if (type==='mealFeedback'&&Number(get('employees',value.employeeId)?.campId)!==Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
+  if (type==='bedAssignments'&&value.endDate&&value.endDate<value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (type==='maintenance'&&!get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
   if (type==='shiftOverrides'&&(!get('employees',value.replacementEmployeeId)||value.originalEmployeeId&&!get('employees',value.originalEmployeeId)||Number(value.originalEmployeeId)===Number(value.replacementEmployeeId))) throw new Error('Ээлжийн ажилтан буруу байна');
   if (type==='mealFeedback'&&value.approvedAllowance!==undefined&&(!Number.isFinite(Number(value.approvedAllowance))||Number(value.approvedAllowance)<0)) throw new Error('Баталсан нэмэгдлийн дүн буруу байна');
+  if (type==='mealFeedback'&&value.hrStatus&&!['pending','approved','rejected'].includes(value.hrStatus)) throw new Error('HR шийдвэр буруу байна');
+  if (type==='mealFeedback'&&value.hrStatus==='approved'&&value.approvedAllowance===undefined) throw new Error('Баталсан нэмэгдлийн дүн оруулна уу');
+  if (type==='mealMenus'&&!['breakfast','lunch','dinner'].includes(value.mealType)) throw new Error('Хоолны төрөл буруу байна');
   return value;
 }
 function ensureUnique(type,value,excludeId) {
   if (type==='employees' && all(type).some(row=>row.id!==Number(excludeId)&&row.register===value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type==='attendance' && all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type==='equipment' && all(type).some(row=>row.id!==Number(excludeId)&&(value.vin&&row.vin===value.vin||!value.vin&&row.parkNo===value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
-  if (type==='bedAssignments'&&value.building&&value.room&&value.bed&&all(type).some(row=>row.id!==Number(excludeId)&&row.building===value.building&&row.room===value.room&&row.bed===value.bed&&String(row.startDate)<=String(value.endDate||'9999-12-31')&&String(value.startDate)<=String(row.endDate||'9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
+  if (type==='bedAssignments'&&all(type).some(row=>row.id!==Number(excludeId)&&Number(row.employeeId)===Number(value.employeeId)&&String(row.startDate)<=String(value.endDate||'9999-12-31')&&String(value.startDate)<=String(row.endDate||'9999-12-31'))) throw new Error('Ажилтан тухайн хугацаанд өөр оронд бүртгэлтэй байна');
+  if (type==='bedAssignments'&&value.building&&value.room&&value.bed&&all(type).some(row=>row.id!==Number(excludeId)&&Number(row.campId)===Number(value.campId)&&row.building===value.building&&row.room===value.room&&row.bed===value.bed&&String(row.startDate)<=String(value.endDate||'9999-12-31')&&String(value.startDate)<=String(row.endDate||'9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
 }
 function canEditRecord(req,type,value) {
   if (req.user.role==='admin') return true;
   if (type==='employees'&&req.user.role==='clerk') return /засвар/i.test(String(value.branch||''));
   if (req.user.role==='clerk'&&['assignments','machineLogs'].includes(type)) return /засвар/i.test(String(get('employees',value.employeeId)?.branch||''));
   if (type==='mealFeedback'&&req.user.role==='camp'&&(value.approvedAllowance!==undefined||value.hrStatus!==undefined||value.hrNote!==undefined)) return false;
-  if (req.user.role==='camp'&&['attendance','campStays'].includes(type)&&value.employeeId) return Number(get('employees',value.employeeId)?.campId)===Number(req.user.campId);
+  if (req.user.role==='camp'&&['attendance','campStays','mealFeedback','bedAssignments'].includes(type)&&value.employeeId&&Number(get('employees',value.employeeId)?.campId)!==Number(req.user.campId)) return false;
+  if (req.user.role==='camp'&&['mealMenus','mealFeedback','bedAssignments','campStays','guests'].includes(type)&&Number(value.campId)!==Number(req.user.campId)) return false;
   if (req.user.role==='camp'&&value.campId) return Number(value.campId)===Number(req.user.campId);
   return true;
 }
@@ -275,6 +283,7 @@ function visibleRecords(type,user,rows,employees) {
     if(type==='attendance')rows=rows.filter(row=>Number(employees.find(e=>e.id===Number(row.employeeId))?.campId)===campId);
     if(type==='camps')rows=rows.filter(row=>row.id===campId);
     if(type==='assignments')rows=rows.filter(row=>Number(row.campId)===campId||Number(employees.find(e=>e.id===Number(row.employeeId))?.campId)===campId);
+    if(['mealMenus','mealFeedback','bedAssignments','campStays','guests'].includes(type))rows=rows.filter(row=>Number(row.campId)===campId);
   }
   if(user.role!=='admin')rows=rows.map(row=>{
     const safe={...row};
@@ -407,7 +416,7 @@ app.post('/api/equipment-all-data/import',auth,admin,async(req,res) => {
 app.put('/api/records/:type/:id',auth,editor,(req,res) => {
   const {type,id}=req.params; if (!types.includes(type)) return res.status(404).end();
   if (!get(type,id)) return res.status(404).json({error:'Бүртгэл олдсонгүй'});
-  try { const old=get(type,id);const value=validate(type,type==='employees'&&req.user.role==='clerk'?{...old,...req.body}:req.body);if(type==='employees'&&req.user.role==='clerk'){const operational=['shiftGroup','rotationPattern','shiftStart','status','campId','notes'];const forbidden=Object.keys(value).filter(key=>!operational.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key]));if(forbidden.length)throw new Error('Клерк зөвхөн ээлж, төлөв, Camp болон тэмдэглэл засна')}if(!canEditRecord(req,type,value)||!canEditRecord(req,type,old))return res.status(403).json({error:'Өөр camp-ийн бүртгэл засах эрхгүй'});ensureUnique(type,value,id);if(type==='shiftOverrides'){db.exec('BEGIN');try{undoShiftOverride(id);db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=? AND project_id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id),currentProject());const changed=applyShiftOverride(id,value);audit(req,type,'update',Number(id),{changedAssignments:changed,changes:changesBetween(old,value)});db.exec('COMMIT');return res.json(get(type,id))}catch(error){db.exec('ROLLBACK');throw error}}if(type==='plans')db.exec('BEGIN');try{db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=? AND project_id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id),currentProject());if(type==='plans')syncPlanAssignments(id,value);audit(req,type,'update',Number(id),{changes:changesBetween(old,value)});if(type==='plans')db.exec('COMMIT');if(type==='machineLogs') updateEquipmentHours(value);res.json(get(type,id))}catch(error){if(type==='plans')db.exec('ROLLBACK');throw error} }
+  try { const old=get(type,id);const value=validate(type,type==='employees'&&req.user.role==='clerk'?{...old,...req.body}:req.body);if(type==='employees'&&req.user.role==='clerk'){const operational=['shiftGroup','rotationPattern','shiftStart','status','campId','notes'];const forbidden=Object.keys(value).filter(key=>!operational.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key]));if(forbidden.length)throw new Error('Клерк зөвхөн ээлж, төлөв, Camp болон тэмдэглэл засна')}if(type==='mealFeedback'&&req.user.role==='hr'){const approved=['approvedAllowance','hrStatus','hrNote'];if(Object.keys(value).some(key=>!approved.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key])))throw new Error('HR зөвхөн нэмэгдэл ба шийдвэр засна')}if(!canEditRecord(req,type,value)||!canEditRecord(req,type,old))return res.status(403).json({error:'Өөр camp-ийн бүртгэл засах эрхгүй'});ensureUnique(type,value,id);if(type==='shiftOverrides'){db.exec('BEGIN');try{undoShiftOverride(id);db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=? AND project_id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id),currentProject());const changed=applyShiftOverride(id,value);audit(req,type,'update',Number(id),{changedAssignments:changed,changes:changesBetween(old,value)});db.exec('COMMIT');return res.json(get(type,id))}catch(error){db.exec('ROLLBACK');throw error}}if(type==='plans')db.exec('BEGIN');try{db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=? AND project_id=?').run(JSON.stringify(value),new Date().toISOString(),type,Number(id),currentProject());if(type==='plans')syncPlanAssignments(id,value);audit(req,type,'update',Number(id),{changes:changesBetween(old,value)});if(type==='plans')db.exec('COMMIT');if(type==='machineLogs') updateEquipmentHours(value);res.json(get(type,id))}catch(error){if(type==='plans')db.exec('ROLLBACK');throw error} }
   catch(err) { res.status(400).json({error:err.message}); }
 });
 app.delete('/api/records/:type/:id',auth,editor,(req,res) => {

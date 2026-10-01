@@ -16,8 +16,8 @@ export const required = {
   maintenance: ['date','equipmentId','reason','startTime'],
   travelExpenses: ['date','employeeId','amount'],
   shiftOverrides: ['date','replacementEmployeeId','reason'],
-  mealMenus: ['date','mealType','name'],
-  mealFeedback: ['date','employeeId','comment'],
+  mealMenus: ['date','campId','mealType','name'],
+  mealFeedback: ['date','campId','employeeId','comment'],
   bedAssignments: ['employeeId','startDate'],
 };
 export const permitted = {
@@ -36,7 +36,7 @@ export const permitted = {
   maintenance: ['date','equipmentId','reason','startTime','endTime','minutes','status','notes'],
   travelExpenses: ['date','employeeId','amount','paid','route','notes'],
   shiftOverrides: ['date','originalEmployeeId','replacementEmployeeId','shift','reason','approvedBy','notes'],
-  mealMenus: ['date','mealType','name','ingredients','notes'],
-  mealFeedback: ['date','employeeId','mealType','comment','requestedAllowance','approvedAllowance','hrStatus','hrNote','notes'],
+  mealMenus: ['date','campId','mealType','name','ingredients','notes'],
+  mealFeedback: ['date','campId','employeeId','mealType','comment','requestedAllowance','approvedAllowance','hrStatus','hrNote','notes'],
   bedAssignments: ['employeeId','campId','building','room','bed','startDate','endDate','notes'],
 };

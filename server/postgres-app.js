@@ -114,6 +114,9 @@ async function validate(type, body, db) {
   if (type === 'machineLogs' && (Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
   if (type === 'machineLogs' && value.endKm !== undefined && Number(value.endKm) < Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type) && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
+  if (['mealMenus','mealFeedback','bedAssignments'].includes(type) && !await get('camps', value.campId, db)) throw new Error('Camp сонгоно уу');
+  if (type === 'mealFeedback' && Number((await get('employees',value.employeeId,db))?.campId) !== Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
+  if (type === 'bedAssignments' && value.endDate && value.endDate < value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (['maintenance'].includes(type) && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
   if (type === 'shiftOverrides') {
     if (!await get('employees', value.replacementEmployeeId, db)) throw new Error('Орлон ажиллах ажилтан олдсонгүй');
@@ -121,6 +124,9 @@ async function validate(type, body, db) {
     if (Number(value.originalEmployeeId) === Number(value.replacementEmployeeId)) throw new Error('Ижил ажилтан сонгож болохгүй');
   }
   if (type === 'mealFeedback' && value.approvedAllowance !== undefined && (!Number.isFinite(Number(value.approvedAllowance)) || Number(value.approvedAllowance) < 0)) throw new Error('Баталсан нэмэгдлийн дүн буруу байна');
+  if (type === 'mealFeedback' && value.hrStatus && !['pending','approved','rejected'].includes(value.hrStatus)) throw new Error('HR шийдвэр буруу байна');
+  if (type === 'mealFeedback' && value.hrStatus === 'approved' && value.approvedAllowance === undefined) throw new Error('Баталсан нэмэгдлийн дүн оруулна уу');
+  if (type === 'mealMenus' && !['breakfast','lunch','dinner'].includes(value.mealType)) throw new Error('Хоолны төрөл буруу байна');
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
@@ -129,14 +135,16 @@ async function ensureUnique(type, value, excludeId, db) {
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type === 'equipment' && rows.some(row => row.id !== Number(excludeId) && (value.vin && row.vin === value.vin || !value.vin && row.parkNo === value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
-  if (type === 'bedAssignments' && value.building && value.room && value.bed && rows.some(row => row.id !== Number(excludeId) && row.building === value.building && row.room === value.room && row.bed === value.bed && String(row.startDate) <= String(value.endDate || '9999-12-31') && String(value.startDate) <= String(row.endDate || '9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
+  if (type === 'bedAssignments' && rows.some(row => row.id !== Number(excludeId) && Number(row.employeeId) === Number(value.employeeId) && String(row.startDate) <= String(value.endDate || '9999-12-31') && String(value.startDate) <= String(row.endDate || '9999-12-31'))) throw new Error('Ажилтан тухайн хугацаанд өөр оронд бүртгэлтэй байна');
+  if (type === 'bedAssignments' && value.building && value.room && value.bed && rows.some(row => row.id !== Number(excludeId) && Number(row.campId) === Number(value.campId) && row.building === value.building && row.room === value.room && row.bed === value.bed && String(row.startDate) <= String(value.endDate || '9999-12-31') && String(value.startDate) <= String(row.endDate || '9999-12-31'))) throw new Error('Энэ ор тухайн хугацаанд эзэнтэй байна');
 }
 async function canEditRecord(req, type, value, db) {
   if (req.user.role === 'admin') return true;
   if (type === 'employees' && req.user.role === 'clerk') return /засвар/i.test(String(value.branch || ''));
   if (req.user.role === 'clerk' && ['assignments','machineLogs'].includes(type)) return /засвар/i.test(String((await get('employees',value.employeeId,db))?.branch||''));
   if (type === 'mealFeedback' && req.user.role === 'camp' && (value.approvedAllowance !== undefined || value.hrStatus !== undefined || value.hrNote !== undefined)) return false;
-  if (req.user.role === 'camp' && ['attendance','campStays'].includes(type) && value.employeeId) return Number((await get('employees', value.employeeId, db))?.campId) === Number(req.user.campId);
+  if (req.user.role === 'camp' && ['attendance','campStays','mealFeedback','bedAssignments'].includes(type) && value.employeeId && Number((await get('employees', value.employeeId, db))?.campId) !== Number(req.user.campId)) return false;
+  if (req.user.role === 'camp' && ['mealMenus','mealFeedback','bedAssignments','campStays','guests'].includes(type) && Number(value.campId) !== Number(req.user.campId)) return false;
   if (req.user.role === 'camp' && value.campId) return Number(value.campId) === Number(req.user.campId);
   return true;
 }
@@ -389,6 +397,7 @@ function visibleRecords(type,user,rows,employees) {
     if(type==='employees')rows=rows.filter(row=>Number(row.campId)===campId);
     if(type==='attendance')rows=rows.filter(row=>employeeCamp.get(Number(row.employeeId))===campId);
     if(type==='assignments')rows=rows.filter(row=>Number(row.campId)===campId||employeeCamp.get(Number(row.employeeId))===campId);
+    if(['mealMenus','mealFeedback','bedAssignments','campStays','guests'].includes(type))rows=rows.filter(row=>Number(row.campId)===campId);
     if(type==='camps')rows=rows.filter(row=>row.id===campId);
   }
   if(user.role!=='admin')rows=rows.map(row=>{
@@ -461,6 +470,7 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
       const forbidden=Object.keys(value).filter(key=>!operational.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key]));
       if (forbidden.length) throw new Error('Клерк зөвхөн ээлж, төлөв, Camp болон тэмдэглэл засна');
     }
+    if (type === 'mealFeedback' && req.user.role === 'hr' && Object.keys(value).some(key => !['approvedAllowance','hrStatus','hrNote'].includes(key) && JSON.stringify(value[key]) !== JSON.stringify(old[key]))) throw new Error('HR зөвхөн нэмэгдэл ба шийдвэр засна');
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
     if (type === 'shiftOverrides') {
