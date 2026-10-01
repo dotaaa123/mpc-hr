@@ -73,7 +73,7 @@ const defaultPermissions = {
   dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
   clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
-  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'] },
+  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
 };
 const permissionPages=[...types,'documents'];
 async function allowed(req, page, action) {
@@ -106,6 +106,8 @@ async function validate(type, body, db) {
   const missing = required[type].filter(key => value[key] === undefined || value[key] === '');
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
+  if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
+  if(type==='payrollEntries') {if(!await get('employees',value.employeeId,db)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value.month))||!['first','second'].includes(value.half))throw new Error('Цалингийн ажилтан эсвэл хугацаа буруу байна');if(['plannedHours','workedHours','travelDays','baseSalary','extraPay','otherDeduction'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||['insuredShare','insuranceRate','taxRate'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0||Number(value[key])>1)))throw new Error('Цалингийн тоо эсвэл хувь буруу байна');if(value.skipPayroll!==undefined&&typeof value.skipPayroll!=='boolean'||value.skipPayroll&&!['rest','terminated','discipline','other','unknown'].includes(value.skipReason))throw new Error('Цалин бодохгүй шалтгааныг сонгоно уу')}
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=await get('employees',id,db);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
@@ -152,11 +154,12 @@ async function validate(type, body, db) {
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
-  if (!['employees','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs'].includes(type)) return;
+  if (!['employees','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs','payrollEntries'].includes(type)) return;
   const rows = await all(type, db);
   if (type === 'machineLogs' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && row.workShift === value.workShift && Number(row.equipmentId) === Number(value.equipmentId))) throw new Error('Энэ техникийн тухайн ээлжийн бүртгэл аль хэдийн байна');
   if (type === 'productionEntries' && productionSourceKey(value) && rows.some(row => row.id !== Number(excludeId) && productionSourceKey(row) === productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
+  if(type==='payrollEntries'&&rows.some(row=>row.id!==Number(excludeId)&&Number(row.employeeId)===Number(value.employeeId)&&row.month===value.month&&row.half===value.half))throw new Error('Энэ ажилтны цалингийн хугацааны тохируулга бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type === 'equipment' && rows.some(row => row.id !== Number(excludeId) && (value.vin && row.vin === value.vin || !value.vin && row.parkNo === value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
   if (type === 'campStays' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && (value.employeeId && Number(row.employeeId) === Number(value.employeeId) || value.guestId && Number(row.guestId) === Number(value.guestId)))) throw new Error('Энэ хүн тухайн өдөр camp-д бүртгэлтэй байна');
@@ -428,7 +431,7 @@ function visibleRecords(type,user,rows,employees) {
   }
   if(user.role!=='admin')rows=rows.map(row=>{
     const safe={...row};
-    if(type==='employees'&&user.role!=='hr') ['register','civilId','phone','email','homeAddress','bankName','bankAccount','lookupAccount','baseSalary','socialSalary','birthDate','verificationNote'].forEach(key=>delete safe[key]);
+    if(type==='employees'&&user.role!=='hr') ['register','civilId','phone','email','homeAddress','bankName','bankAccount','lookupAccount','baseSalary','socialSalary','insuredShare','payrollPlannedDays','birthDate','verificationNote'].forEach(key=>delete safe[key]);
     if(type==='equipment')['unitPriceMnt','currency','contractNo','contractCompany','sourceData','certificate','customsDocument','passport'].forEach(key=>delete safe[key]);
     if(type==='plans')delete safe.unitRevenue;
     if(type==='fuel')delete safe.pricePerLiter;

@@ -21,6 +21,7 @@ export function timesheetRows(employees,attendance,month,half){
     const travelHours=count('travel')*8;
     const missingDays=dates.filter(date=>eligible(date)&&!records.has(`${employee.id}:${date}`)).length;
     const employmentConflictDays=dates.filter(date=>!eligible(date)&&records.has(`${employee.id}:${date}`)).length;
-    return {employee,daily,dayCount:count('day'),nightCount:count('night'),travelCount:count('travel'),absentCount:count('absent'),restCount:count('rest'),leaveCount:count('leave'),workHours,travelHours,creditedHours:workHours+travelHours,missingDays,employmentConflictDays,missingWorkHours:values.filter(row=>['day','night'].includes(row.status)&&!(Number(row.actualHours)>0)).length};
+    const plannedHours=values.reduce((sum,row)=>sum+Number(row.plannedHours||0),0);
+    return {employee,daily,dayCount:count('day'),nightCount:count('night'),travelCount:count('travel'),absentCount:count('absent'),restCount:count('rest'),leaveCount:count('leave'),workHours,travelHours,plannedHours,creditedHours:workHours+travelHours,missingDays,employmentConflictDays,missingWorkHours:values.filter(row=>['day','night'].includes(row.status)&&!(Number(row.actualHours)>0)).length};
   });
 }

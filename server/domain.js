@@ -1,5 +1,5 @@
 export const roles = ['admin', 'dispatcher', 'clerk', 'camp', 'hr'];
-export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'productionEntries', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments'];
+export const types = ['employees', 'attendance', 'equipment', 'camps', 'warehouses', 'plans', 'productionEntries', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments', 'payrollEntries'];
 export const required = {
   employees: ['lastName', 'firstName', 'register', 'position'],
   attendance: ['date','employeeId','status'],
@@ -20,9 +20,10 @@ export const required = {
   mealMenus: ['date','campId','mealType','name'],
   mealFeedback: ['date','campId','employeeId','comment'],
   bedAssignments: ['employeeId','startDate'],
+  payrollEntries: ['employeeId','month','half'],
 };
 export const permitted = {
-  employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','initialDayNight','status','notes','sourceSheet','sourceRow'],
+  employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','insuredShare','payrollPlannedDays','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','initialDayNight','status','notes','sourceSheet','sourceRow'],
   attendance: ['date','employeeId','status','plannedHours','actualHours','campId','notes'],
   equipment: ['parkNo','kind','brand','model','vin','plateNo','site','warehouseId','owner','currentHours','fuelRate','status','availability','year','sourceStatus','operatorAId','operatorBId','operatorCId','operatorDId','contractNo','contractCompany','unitPriceMnt','currency','warranty','certificate','customsDocument','passport','sourceSheet','sourceRow','sourceData','notes'],
   camps: ['name','location','capacity','workType','manager','notes'],
@@ -41,4 +42,5 @@ export const permitted = {
   mealMenus: ['date','campId','mealType','name','ingredients','notes'],
   mealFeedback: ['date','campId','employeeId','mealType','comment','requestedAllowance','approvedAllowance','hrStatus','hrNote','notes'],
   bedAssignments: ['employeeId','campId','building','room','bed','startDate','endDate','notes'],
+  payrollEntries: ['employeeId','month','half','plannedHours','workedHours','travelDays','baseSalary','insuredShare','insuranceRate','taxRate','extraPay','otherDeduction','skipPayroll','skipReason','notes'],
 };
