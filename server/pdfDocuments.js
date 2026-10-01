@@ -65,7 +65,8 @@ export async function createEmployeePdf({kind,employee,fields={},approvers=[]}) 
     draw('ТУШААХ нь:',11,{after:8});
     if(kind==='hiring'){
       draw(`Нэг. ${company}-ийн ${fields.projectName || 'Ууцар'} төслийн ${employee.branch || '________________'} салбарт ${fullName} (РД: ${employee.register || '________'})-ыг ${employee.position || '________________'} албан тушаалд ${fields.effectiveDate || employee.hireDate || date}-ны өдрөөс ${trialMonths>0?`${trialMonths} сарын туршилтын хугацаагаар `:''}томилсугай.`,10,{after:8});
-      draw(`Хоёр. Үндсэн цалин: ${Number(employee.baseSalary || 0).toLocaleString('mn-MN')} төгрөг. Цалингийн нөхцөлийг хөдөлмөрийн гэрээ болон батлагдсан журмын дагуу хэрэгжүүлсүгэй.`,10,{after:8});
+      const salary=Number(fields.salaryAmount || employee.baseSalary || 0);
+      draw(`Хоёр. Үндсэн цалин: ${salary>0?salary.toLocaleString('mn-MN'):'________________'} төгрөг. Цалингийн нөхцөлийг хөдөлмөрийн гэрээ болон батлагдсан журмын дагуу хэрэгжүүлсүгэй.`,10,{after:8});
       draw('Гурав. Хөдөлмөрийн гэрээ, ажлын байрны тодорхойлолт болон дотоод журмыг ажилтанд танилцуулж баталгаажуулахыг Хүний нөөцөд даалгасугай.',10,{after:8});
     }else{
       draw(`Нэг. ${company}-ийн ${employee.branch || '________________'} салбарын ${employee.position || '________________'} албан тушаалтай ${fullName} (РД: ${employee.register || '________'})-ын хөдөлмөр эрхлэлтийн харилцааг ${fields.effectiveDate || employee.terminationDate || date}-ны өдрөөр дуусгавар болгосугай.`,10,{after:8});
