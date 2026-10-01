@@ -301,7 +301,7 @@ app.get('/api/audit', auth, admin, async (req, res) => {
 });
 app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
 const documentEditor = async (req,res,next) => {try{const action=req.method==='GET'?'read':req.method==='DELETE'?'delete':'create';return await allowed(req,'documents',action)?next():res.status(403).json({error:'HR баримтын энэ үйлдэлд эрхгүй'})}catch(error){next(error)}};
-const documentFields = ['date','companyName','companyAddress','orderNumber','city','legalBasis','effectiveDate','trialMonths','salaryAmount','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','approvalDecision','payMode','payCondition','purpose'];
+const documentFields = ['date','companyName','companyAddress','companyPhone','companyEmail','contractType','orderNumber','city','legalBasis','effectiveDate','trialMonths','salaryAmount','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','approvalDecision','payMode','payCondition','purpose'];
 app.get('/api/documents',auth,documentEditor,async (_req,res)=>{
   const {rows}=await query('SELECT id,employee_id AS "employeeId",kind,fields,approvers,created_at AS "createdAt" FROM public.documents WHERE project_id=$1 ORDER BY id DESC LIMIT 200',[currentProject()]);
   res.json(rows);

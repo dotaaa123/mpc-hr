@@ -102,14 +102,18 @@ export async function createEmployeePdf({kind,employee,fields={},approvers=[]}) 
     label('Цалингийн нөхцөл',fields.payCondition);
     y-=18;rule();
     for(const person of approvers.slice(0,8)) label(person.position,person.name);
-    if(!approvers.length){label('Ажилтны гарын үсэг','');label('Бүртгэсэн','');label('Хянасан','');label('Зөвшөөрсөн','');label('Баталсан','')}
+    if(!approvers.length){label('Ажилтны гарын үсэг','');label('Бүртгэсэн / Засварын клерк','');label('Хянасан / Засварын мастер','');label('Зөвшөөрсөн / Техник ашиглалтын албаны дарга','');label('Баталсан / Ерөнхий менежер','')}
   } else if(kind==='certificate') {
     draw(company,14,{center:true,after:8});
-    draw(fields.companyAddress || 'Улаанбаатар хот, Сүхбаатар дүүрэг, 1 дүгээр хороо, Олимпийн гудамж 7/3 байр',9,{center:true,after:10});
+    draw(fields.companyAddress || 'Улаанбаатар хот, Сүхбаатар дүүрэг, 1 дүгээр хороо, Олимпийн гудамж 7/3 байр',9,{center:true,after:3});
+    draw(`Утас: ${fields.companyPhone || '(976) 88338768'}    И-мэйл: ${fields.companyEmail || 'majorbalancetradellc@gmail.com'}`,9,{center:true,after:10});
     rule();
     draw(`Огноо: ${date}                                      Дугаар: ${fields.orderNumber || '______'}`,9,{after:18});
     draw('АЖИЛТНЫ ТОДОРХОЙЛОЛТ',15,{center:true,after:18});
-    draw(`${fullName} (РД: ${employee.register || '________'}) нь ${company}-ийн ${employee.branch || '________________'} салбарт ${employee.position || '________________'} албан тушаалд ${employee.hireDate || '________'}-ны өдрөөс ${employee.terminationDate ? `${employee.terminationDate}-ны өдөр хүртэл ажиллаж байсан` : 'өнөөдрийг хүртэл ажиллаж байгаа'} нь үнэн болно.`,11,{after:16});
+    draw(`${fullName} (РД: ${employee.register || '________'}) нь ${company}-ийн ${employee.branch || '________________'} салбарт ${employee.position || '________________'} албан тушаалд ${employee.hireDate || '________'}-ны өдрөөс ${employee.terminationDate ? `${employee.terminationDate}-ны өдөр хүртэл ажиллаж байсан` : 'өнөөдрийг хүртэл ажиллаж байгаа'} нь үнэн болно.`,11,{after:10});
+    if(fields.contractType)label('Гэрээний төрөл',fields.contractType);
+    const salary=Number(fields.salaryAmount || employee.baseSalary || 0);
+    if(salary>0)label('Үндсэн цалин',`${salary.toLocaleString('mn-MN')} ₮`);
     if(fields.purpose) label('Тодорхойлолтын зорилго',fields.purpose);
     signature();
   }
