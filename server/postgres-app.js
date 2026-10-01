@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { parseAllData } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
+import { findDependentRecord } from './references.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -104,7 +105,7 @@ async function validate(type, body, db) {
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
-  if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive'; }
+  if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=await get('employees',id,db);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db), await all('attendance', db), await all('shiftOverrides', db));
   if (type === 'assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
   if (type === 'assignments' && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
@@ -478,6 +479,7 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
   if (!old) return res.status(404).json({ error: 'Бүртгэл олдсонгүй' });
   try {
     const value = await validate(type, type==='employees'&&req.user.role==='clerk'?{...old,...req.body}:req.body);
+    if (type==='employees'&&old.shiftGroup!==value.shiftGroup&&(await all('equipment')).some(machine=>['A','B','C','D'].some(group=>Number(machine[`operator${group}Id`])===Number(id)&&group!==value.shiftGroup))) throw new Error('Техникт оператороор оноосон ажилтны ээлжийг эхлээд техникээс чөлөөлнө');
     if (type==='employees'&&req.user.role==='clerk') {
       const operational=['shiftGroup','rotationPattern','shiftStart','status','campId','notes'];
       const forbidden=Object.keys(value).filter(key=>!operational.includes(key)&&JSON.stringify(value[key])!==JSON.stringify(old[key]));
@@ -511,6 +513,11 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
   if (!await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл устгах эрхгүй' });
   try {
     await withTransaction(async db => {
+      const linkedRows=(await query('SELECT type,id,body FROM public.records WHERE project_id=$1',[currentProject()],db)).rows.reduce((group,row)=>{(group[row.type]??=[]).push({id:row.id,...row.body});return group},{});
+      const dependent=findDependentRecord(type,id,linkedRows);
+      if(dependent)throw new Error(`Холбоотой ${dependent.type} #${dependent.id} бүртгэл байгаа тул устгах боломжгүй`);
+      if(type==='employees'&&((await query('SELECT id FROM public.users WHERE employee_id=$1 LIMIT 1',[Number(id)],db)).rowCount||(await query('SELECT id FROM public.documents WHERE employee_id=$1 AND project_id=$2 LIMIT 1',[Number(id),currentProject()],db)).rowCount))throw new Error('Хэрэглэгч эсвэл PDF баримттай ажилтныг устгах боломжгүй');
+      if(type==='camps'&&(await query('SELECT id FROM public.users WHERE camp_id=$1 AND project_id=$2 LIMIT 1',[Number(id),currentProject()],db)).rowCount)throw new Error('Хэрэглэгч оноосон Camp-ийг устгах боломжгүй');
       if (type === 'plans') {
         const linked = (await all('assignments', db)).filter(row => Number(row.planId) === Number(id));
         for (const row of linked) {
