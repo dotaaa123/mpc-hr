@@ -554,6 +554,7 @@ app.post('/api/import/:type', auth, editor, async (req, res) => {
   if (!types.includes(type)) return res.status(404).end();
   const rows = req.body.rows;
   if (!Array.isArray(rows) || rows.length > (type === 'productionEntries' ? 3000 : 2000)) return res.status(400).json({ error: 'Импортын мөрийн тоо хэтэрлээ' });
+  if (type === 'equipment' && rows.some(row => String(row.sourceStatus || '').startsWith('OTR 2026-04-03')) && (await query('SELECT name FROM public.projects WHERE id=$1', [currentProject()])).rows[0]?.name !== 'Чанд-Үйлс') return res.status(400).json({ error: 'OTR техникийн жагсаалтыг зөвхөн Чанд-Үйлс төсөлд импортлоно' });
   try {
     let batchId;
     await withTransaction(async db => {

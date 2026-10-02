@@ -353,6 +353,7 @@ app.post('/api/import/:type',auth,editor,(req,res)=>{
   if(!types.includes(type))return res.status(404).end();
   const rows=req.body.rows;
   if(!Array.isArray(rows)||rows.length>(type==='productionEntries'?3000:2000))return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
+  if(type==='equipment'&&rows.some(row=>String(row.sourceStatus||'').startsWith('OTR 2026-04-03'))&&db.prepare('SELECT name FROM projects WHERE id=?').get(currentProject())?.name!=='Чанд-Үйлс')return res.status(400).json({error:'OTR техникийн жагсаалтыг зөвхөн Чанд-Үйлс төсөлд импортлоно'});
   try{
     const values=rows.map((row,i)=>{try{const value=validate(type,row);if(!canEditRecord(req,type,value))throw new Error('Өөр camp-ийн ажилтан');return value}catch(error){throw new Error(`${i+2}-р мөр: ${error.message}`)}});
     db.exec('BEGIN');
