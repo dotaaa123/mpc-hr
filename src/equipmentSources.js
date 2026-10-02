@@ -1,4 +1,7 @@
-const value = cell => String(cell?.text ?? cell?.value ?? '').trim();
+import { normalizeVin } from '../shared/equipmentIdentity.js';
+const value = cell => { try { return String(cell?.text ?? cell?.value ?? '').trim(); } catch { return ''; } };
+const yearOf = input => String(input || '').match(/20\d{2}/)?.[0] || '';
+const typeOf = text => /EXCAVATOR|экскаватор/i.test(text) ? 'Экскаватор' : /WT\s?1[03]0|дамп|самосвал|өөрөө буулгагч/i.test(text) ? 'Дамп' : /GREADER|грейдер/i.test(text) ? 'Автогрейдер' : /DOZER|бульдозер/i.test(text) ? 'Бульдозер' : /LIGHT VEHICLE/i.test(text) ? 'Суудлын машин' : text || 'Техник';
 
 async function sheetFrom(file, sheetName) {
   const { default: ExcelJS } = await import('exceljs');
@@ -69,4 +72,43 @@ export async function parseSoldEquipment(file) {
       motorHours: value(row.getCell(6)), note: value(row.getCell(7)) });
   }
   return { rows, issues, total: rows.reduce((sum, row) => sum + row.count, 0) };
+}
+
+export async function parseChandFleet(file) {
+  const sheet = await sheetFrom(file, '2026');
+  if (!value(sheet.getCell('G2')).includes('Парк дугаар') || !value(sheet.getCell('H2')).includes('Арлын дугаар')) throw new Error('2026 хуудасны парк/VIN багана олдсонгүй');
+  const rows=[]; const issues=[]; const parks=new Set(); const vins=new Set();
+  for(let n=4;n<=sheet.rowCount;n++){
+    const row=sheet.getRow(n);
+    const parkNo=value(row.getCell(7)).toUpperCase();
+    const rawVin=value(row.getCell(8));
+    if(!parkNo&&!rawVin)continue;
+    const vin=normalizeVin(rawVin);
+    const model=value(row.getCell(5))||value(row.getCell(4));
+    const rawKind=value(row.getCell(3));
+    if(!parkNo||!vin||!model||!rawKind){issues.push(`${n}-р мөр: парк, VIN, төрөл эсвэл загвар дутуу`);continue}
+    if(parks.has(parkNo)||vins.has(vin)){issues.push(`${n}-р мөр: давхардсан парк/VIN (${parkNo})`);continue}
+    parks.add(parkNo);vins.add(vin);
+    const tank=Number(value(row.getCell(14)).replaceAll(',',''));
+    rows.push({parkNo,kind:typeOf(rawKind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(9)),year:yearOf(value(row.getCell(21))),site:'Чанд-Үйлс',status:'inactive',availability:'inactive',...(tank>0?{tankCapacityLiters:tank}:{}),sourceStatus:'Чанд-Үйлс 2026 · бэлэн байдал баталгаажаагүй',sourceSheet:'2026',sourceRow:n,notes:rawVin!==vin?`Эх файлын VIN: ${rawVin}`:''});
+  }
+  return {rows,issues};
+}
+
+export async function parseUutsarFleet(file) {
+  const sheet=await sheetFrom(file,'СЕРИАЛ ДУГААРУУД');
+  if(!value(sheet.getCell('F2')).includes('СЕРИЙН ДУГААР')||!value(sheet.getCell('I2')).includes('Заамар'))throw new Error('Техникийн серийн Excel-ийн багана олдсонгүй');
+  const rows=[];const issues=[];const parks=new Set();const vins=new Set();
+  for(let n=3;n<=sheet.rowCount;n++){
+    const row=sheet.getRow(n);
+    const kind=value(row.getCell(5));const model=value(row.getCell(10));
+    if(!kind||!model)continue;
+    const parkNo=value(row.getCell(9)).toUpperCase();const vin=normalizeVin(value(row.getCell(6)));
+    if(!parkNo){issues.push(`${n}-р мөр: парк дугаар байхгүй (${model})`);continue}
+    if(parks.has(parkNo)||vin&&vins.has(vin)){issues.push(`${n}-р мөр: давхардсан парк/VIN (${parkNo})`);continue}
+    parks.add(parkNo);if(vin)vins.add(vin);
+    const moto=value(row.getCell(12));
+    rows.push({parkNo,kind:typeOf(kind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(7)),year:yearOf(value(row.getCell(13))),site:'Ууцар',status:'inactive',availability:'inactive',sourceStatus:'Ууцар серийн жагсаалт · бэлэн байдал баталгаажаагүй',sourceSheet:sheet.name,sourceRow:n,notes:[value(row.getCell(8))&&`Хуучин парк: ${value(row.getCell(8))}`,moto&&`Эх файлын мото цаг: ${moto}`].filter(Boolean).join(' · ')});
+  }
+  return {rows,issues};
 }

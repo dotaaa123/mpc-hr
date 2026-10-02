@@ -13,6 +13,8 @@ import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
+import { validateFuelEntry } from '../shared/fuelEntry.js';
+import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -77,6 +79,7 @@ function validate(type, body) {
   const value=clean(type,body);
   const missing=required[type].filter(k => value[k]===undefined || value[k]==='');
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
+  if(type==='fuel')validateFuelEntry(value,value.equipmentId?get('equipment',value.equipmentId):null);
   if (type==='employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
   if(type==='payrollEntries') {if(!get('employees',value.employeeId)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value.month))||!['first','second'].includes(value.half))throw new Error('Цалингийн ажилтан эсвэл хугацаа буруу байна');if(['plannedHours','workedHours','travelDays','baseSalary','extraPay','otherDeduction'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||['insuredShare','insuranceRate','taxRate'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0||Number(value[key])>1)))throw new Error('Цалингийн тоо эсвэл хувь буруу байна');if(value.skipPayroll!==undefined&&typeof value.skipPayroll!=='boolean'||value.skipPayroll&&!['rest','terminated','discipline','other','unknown'].includes(value.skipReason))throw new Error('Цалин бодохгүй шалтгааныг сонгоно уу')}
@@ -374,7 +377,7 @@ app.post('/api/imports/:id/undo',auth,admin,(req,res)=>{
   if(!batch)return res.status(404).json({error:'Импорт олдсонгүй эсвэл буцаагдсан байна'});
   db.exec('BEGIN');
   try{
-    if(batch.type==='equipmentAllData'){
+    if(['equipmentAllData','equipmentSource'].includes(batch.type)){
       const snapshot=JSON.parse(batch.undo_snapshot||'{}');
       if(!Array.isArray(snapshot.updated)||!Array.isArray(snapshot.warehouseIds))throw new Error('ALL DATA импортын сэргээх мэдээлэл байхгүй');
       const records=db.prepare('SELECT id,type,body,import_batch_id AS importBatchId,created_at AS createdAt,updated_at AS updatedAt FROM records WHERE project_id=?').all(currentProject()).map(row=>({...row,body:JSON.parse(row.body)}));
@@ -403,6 +406,35 @@ app.post('/api/imports/:id/undo',auth,admin,(req,res)=>{
     if(batch.type==='machineLogs')for(const [id,hours] of Object.entries(snapshot.beforeHours)){const machine=get('equipment',id);const remaining=all('machineLogs').filter(row=>Number(row.equipmentId)===Number(id));const nextHours=Math.max(Number(hours),...remaining.map(row=>Number(row.endHours||0)));const {id:recordId,createdAt,updatedAt,...body}=machine;body.currentHours=nextHours;db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=? AND project_id=?').run(JSON.stringify(body),new Date().toISOString(),recordId,currentProject())}
     db.prepare('UPDATE import_batches SET undone_at=CURRENT_TIMESTAMP WHERE id=?').run(batch.id);
     audit(req,batch.type,'import_undo',null,{batchId:batch.id,count:result.changes});db.exec('COMMIT');res.json({count:result.changes});
+  }catch(error){db.exec('ROLLBACK');res.status(400).json({error:error.message})}
+});
+app.post('/api/equipment-source/import',auth,admin,(req,res)=>{
+  const projectName={chand2026:'Чанд-Үйлс',uutsarSerial:'Ууцар'}[req.body.source];
+  const rows=req.body.rows;
+  if(!projectName||!Array.isArray(rows)||!rows.length||rows.length>500)return res.status(400).json({error:'Техникийн эх файл эсвэл мөрийн тоо буруу байна'});
+  if(db.prepare('SELECT name FROM projects WHERE id=?').get(currentProject())?.name!==projectName)return res.status(400).json({error:`Энэ файлыг зөвхөн ${projectName} төсөлд оруулна`});
+  let added=0,updated=0,unchanged=0,batchId;
+  db.exec('BEGIN');
+  try{
+    batchId=db.prepare('INSERT INTO import_batches(project_id,type,filename,row_count,created_by) VALUES(?,?,?,?,?)').run(currentProject(),'equipmentSource',String(req.body.filename||'Техникийн эх файл').slice(0,200),rows.length,req.user.id).lastInsertRowid;
+    const snapshot={updated:[],warehouseIds:[]};const seenPark=new Set();const seenVin=new Set();
+    for(const [index,row] of rows.entries()){
+      const value=validate('equipment',{...row,site:projectName,status:'inactive',availability:'inactive'});
+      value.parkNo=normalizePark(value.parkNo);value.vin=normalizeVin(value.vin);
+      const park=normalizePark(value.parkNo),vin=normalizeVin(value.vin);
+      if(seenPark.has(park)||vin&&seenVin.has(vin))throw new Error(`${index+1}-р техникийн парк/VIN файл дотор давхардсан`);
+      seenPark.add(park);if(vin)seenVin.add(vin);
+      const current=all('equipment');
+      const byPark=current.find(item=>normalizePark(item.parkNo)===park);
+      const byVin=vin?current.find(item=>normalizeVin(item.vin)===vin):null;
+      if(byPark&&byVin&&byPark.id!==byVin.id)throw new Error(`${park}: VIN өөр парк дугаарт бүртгэлтэй`);
+      if(byVin&&normalizePark(byVin.parkNo)!==park)throw new Error(`${park}: VIN өөр парк дугаарт бүртгэлтэй`);
+      if(byPark){const {id,createdAt,updatedAt,...before}=byPark;const after=mergeEquipmentSource(before,value);if(isDeepStrictEqual(before,after)){unchanged++;continue}snapshot.updated.push({id,before,after});db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=? AND project_id=?').run(JSON.stringify(after),new Date().toISOString(),id,currentProject());updated++}
+      else{const record=insert('equipment',value);db.prepare('UPDATE records SET import_batch_id=? WHERE id=? AND project_id=?').run(batchId,record.id,currentProject());added++}
+    }
+    db.prepare('UPDATE import_batches SET undo_snapshot=? WHERE id=?').run(JSON.stringify(snapshot),batchId);
+    audit(req,'equipment','import',null,{batchId,added,updated,unchanged,source:req.body.source});
+    db.exec('COMMIT');res.json({added,updated,unchanged,batchId});
   }catch(error){db.exec('ROLLBACK');res.status(400).json({error:error.message})}
 });
 app.post('/api/equipment-all-data/import',auth,admin,async(req,res) => {
