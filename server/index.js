@@ -1,6 +1,6 @@
 import express from 'express';
 import { DatabaseSync } from 'node:sqlite';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { mkdirSync } from 'node:fs';
@@ -34,7 +34,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, name TEXT 
 CREATE TABLE IF NOT EXISTS role_permissions (project_id INTEGER NOT NULL, role TEXT NOT NULL, permissions TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(project_id,role));
 CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY, project_id INTEGER, user_id INTEGER, username TEXT NOT NULL, role TEXT NOT NULL, page TEXT NOT NULL, action TEXT NOT NULL, record_id INTEGER, details TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, approvers TEXT NOT NULL, pdf BLOB NOT NULL, created_by INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS import_batches (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, type TEXT NOT NULL, filename TEXT, row_count INTEGER NOT NULL, created_by INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, undone_at TEXT);`);
+CREATE TABLE IF NOT EXISTS import_batches (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, type TEXT NOT NULL, filename TEXT, row_count INTEGER NOT NULL, created_by INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, undone_at TEXT);
+CREATE TABLE IF NOT EXISTS desktop_releases (id INTEGER PRIMARY KEY, filename TEXT NOT NULL, version TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, chunk_count INTEGER NOT NULL, published INTEGER NOT NULL DEFAULT 0, created_by INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS desktop_release_chunks (release_id INTEGER NOT NULL, chunk_index INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(release_id,chunk_index));`);
 if (!db.prepare('PRAGMA table_info(import_batches)').all().some(row=>row.name==='undo_snapshot')) db.exec("ALTER TABLE import_batches ADD COLUMN undo_snapshot TEXT NOT NULL DEFAULT '{}'");
 if (!db.prepare('PRAGMA table_info(users)').all().some(row=>row.name==='project_id')) db.exec('ALTER TABLE users ADD COLUMN project_id INTEGER');
 if (!db.prepare('PRAGMA table_info(users)').all().some(row=>row.name==='employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER');
@@ -74,7 +76,7 @@ const allowed=(req,page,action)=>Boolean(permissionsFor(req.user)[page]?.include
 const editor=(req,res,next)=>allowed(req,req.params.type,req.method==='DELETE'?'delete':req.method==='PUT'||req.method==='PATCH'?'update':'create')?next():res.status(403).json({error:'Бүртгэх эрхгүй'});
 function audit(req,page,action,recordId,details={}) {db.prepare('INSERT INTO audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES(?,?,?,?,?,?,?,?)').run(currentProject(),req.user.id,req.user.username,req.user.role,page,action,recordId||null,JSON.stringify(details))}
 const changesBetween=(before,after)=>Object.fromEntries(Object.keys(after).filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,{before:before[key]??null,after:after[key]??null}]));
-app.use('/api',(req,res,next)=>{if(['/login','/health'].includes(req.path))return next();auth(req,res,()=>{const projectId=req.user.role==='admin'&&req.headers['x-project-id']?Number(req.headers['x-project-id']):Number(req.user.projectId);if(!db.prepare('SELECT id FROM projects WHERE id=? AND active=1').get(projectId))return res.status(403).json({error:'Төсөл сонгоно уу'});projectContext.run({projectId},next)})});
+app.use('/api',(req,res,next)=>{if(['/login','/health','/desktop-release/latest'].includes(req.path)||/^\/desktop-release\/\d+\/chunks\/\d+$/.test(req.path))return next();auth(req,res,()=>{const projectId=req.user.role==='admin'&&req.headers['x-project-id']?Number(req.headers['x-project-id']):Number(req.user.projectId);if(!db.prepare('SELECT id FROM projects WHERE id=? AND active=1').get(projectId))return res.status(403).json({error:'Төсөл сонгоно уу'});projectContext.run({projectId},next)})});
 function validate(type, body) {
   const value=clean(type,body);
   const missing=required[type].filter(k => value[k]===undefined || value[k]==='');
@@ -86,6 +88,7 @@ function validate(type, body) {
   if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=get('employees',id);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
+  if (type === 'equipment' && value.haulCapacity !== undefined && (!Number.isFinite(Number(value.haulCapacity)) || Number(value.haulCapacity) <= 0)) throw new Error('Нэг рейсийн багтаамж 0-ээс их байх ёстой');
   if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'),all('attendance'),all('shiftOverrides'));
   if (type==='productionEntries') validateProduction(value);
   if (type==='assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
@@ -98,7 +101,8 @@ function validate(type, body) {
   if (type==='machineLogs'&&value.shiftGroup&&!['A','B','C','D'].includes(value.shiftGroup)) throw new Error('A/B/C/D ээлж буруу байна');
   if (type==='machineLogs'&&value.employeeId&&!value.shiftGroup) throw new Error('Операторын A/B/C/D ээлжийг сонгоно уу');
   if (type==='machineLogs'&&value.employeeId&&get('employees',value.employeeId)?.shiftGroup!==value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
-  if (type==='machineLogs' && (Number(value.endHours)<Number(value.startHours) || Number(value.startHours)<0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type==='machineLogs' && (!Number.isFinite(Number(value.startHours)) || !Number.isFinite(Number(value.endHours)) || Number(value.endHours)<Number(value.startHours) || Number(value.startHours)<0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type==='machineLogs') value.workedMotorHours=Number((Number(value.endHours)-Number(value.startHours)).toFixed(2));
   if (type==='machineLogs') validateShiftHours(value);
   if (type==='machineLogs' && value.endKm!==undefined && Number(value.endKm)<Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type)&&value.employeeId&&!get('employees',value.employeeId)) throw new Error('Ажилтан олдсонгүй');
@@ -198,6 +202,47 @@ function updateEquipmentHours(log) {
   body.currentHours=Number(log.endHours);
   db.prepare('UPDATE records SET body=?,updated_at=? WHERE id=? AND project_id=?').run(JSON.stringify(body),new Date().toISOString(),id,currentProject());
 }
+const releaseChunkBytes=1024*1024,releaseMaxBytes=250*1024*1024;
+const releaseInfo=row=>row&&({id:row.id,filename:row.filename,version:row.version,size:row.size_bytes,sha256:row.sha256,chunkCount:row.chunk_count,createdAt:row.created_at});
+app.get('/api/desktop-release/latest',(_req,res)=>res.json(releaseInfo(db.prepare('SELECT * FROM desktop_releases WHERE published=1 ORDER BY id DESC LIMIT 1').get())||null));
+app.post('/api/desktop-release',auth,admin,(req,res)=>{
+  const {filename,version,size,sha256}=req.body||{};
+  if(!/^[^/\\]{1,150}\.zip$/i.test(String(filename||''))||!/^[0-9a-zA-Z._-]{1,40}$/.test(String(version||''))||!Number.isSafeInteger(size)||size<1||size>releaseMaxBytes||!/^[a-f0-9]{64}$/i.test(String(sha256||'')))return res.status(400).json({error:'ZIP файл, хувилбар, хэмжээ эсвэл SHA-256 буруу байна'});
+  db.prepare("DELETE FROM desktop_release_chunks WHERE release_id IN (SELECT id FROM desktop_releases WHERE published=0 AND created_at<datetime('now','-7 days'))").run();
+  db.prepare("DELETE FROM desktop_releases WHERE published=0 AND created_at<datetime('now','-7 days')").run();
+  const result=db.prepare('INSERT INTO desktop_releases(filename,version,size_bytes,sha256,chunk_count,created_by) VALUES(?,?,?,?,?,?)').run(filename,version,size,sha256.toLowerCase(),Math.ceil(size/releaseChunkBytes),req.user.id);
+  res.status(201).json(releaseInfo(db.prepare('SELECT * FROM desktop_releases WHERE id=?').get(result.lastInsertRowid)));
+});
+app.put('/api/desktop-release/:id/chunks/:index',auth,admin,(req,res)=>{
+  const id=Number(req.params.id),index=Number(req.params.index),release=db.prepare('SELECT * FROM desktop_releases WHERE id=?').get(id);
+  if(!release||release.published||!Number.isInteger(index)||index<0||index>=release.chunk_count)return res.status(404).json({error:'Хувилбар эсвэл хэсэг олдсонгүй'});
+  const base64=req.body?.data;
+  if(typeof base64!=='string'||!/^[A-Za-z0-9+/]*={0,2}$/.test(base64))return res.status(400).json({error:'Файлын хэсэг буруу байна'});
+  const data=Buffer.from(base64,'base64'),expected=Math.min(releaseChunkBytes,release.size_bytes-index*releaseChunkBytes);
+  if(data.length!==expected)return res.status(400).json({error:'Файлын хэсгийн хэмжээ буруу байна'});
+  db.prepare('INSERT INTO desktop_release_chunks(release_id,chunk_index,data) VALUES(?,?,?) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=excluded.data').run(id,index,data);
+  res.json({ok:true,index});
+});
+app.post('/api/desktop-release/:id/publish',auth,admin,(req,res)=>{
+  const id=Number(req.params.id),release=db.prepare('SELECT * FROM desktop_releases WHERE id=?').get(id);
+  if(!release||release.published)return res.status(404).json({error:'Нийтлээгүй хувилбар олдсонгүй'});
+  const chunks=db.prepare('SELECT chunk_index,data FROM desktop_release_chunks WHERE release_id=? ORDER BY chunk_index').all(id),hash=createHash('sha256');let bytes=0;
+  if(!chunks.length||Buffer.from(chunks[0].data).subarray(0,4).toString('hex')!=='504b0304')return res.status(400).json({error:'ZIP файл биш байна'});
+  for(let i=0;i<chunks.length;i++){if(chunks[i].chunk_index!==i)break;hash.update(chunks[i].data);bytes+=chunks[i].data.length}
+  if(chunks.length!==release.chunk_count||bytes!==release.size_bytes||hash.digest('hex')!==release.sha256)return res.status(400).json({error:'Файл бүрэн бус эсвэл шалгах дүн зөрсөн байна'});
+  db.exec('BEGIN');try{db.prepare('UPDATE desktop_releases SET published=0 WHERE published=1').run();db.prepare('UPDATE desktop_releases SET published=1 WHERE id=?').run(id);db.exec('COMMIT')}catch(e){db.exec('ROLLBACK');throw e}
+  audit(req,'desktopRelease','publish',id,{filename:release.filename,version:release.version,sha256:release.sha256});
+  db.prepare('DELETE FROM desktop_release_chunks WHERE release_id IN (SELECT id FROM desktop_releases WHERE id NOT IN (SELECT id FROM desktop_releases ORDER BY id DESC LIMIT 2))').run();
+  db.prepare('DELETE FROM desktop_releases WHERE id NOT IN (SELECT id FROM desktop_releases ORDER BY id DESC LIMIT 2)').run();
+  res.json({...releaseInfo(release),published:true});
+});
+app.get('/api/desktop-release/:id/chunks/:index',(req,res)=>{
+  const id=Number(req.params.id),index=Number(req.params.index),release=db.prepare('SELECT published,chunk_count FROM desktop_releases WHERE id=?').get(id);
+  if(!release?.published||!Number.isInteger(index)||index<0||index>=release.chunk_count)return res.status(404).json({error:'Файл олдсонгүй'});
+  const chunk=db.prepare('SELECT data FROM desktop_release_chunks WHERE release_id=? AND chunk_index=?').get(id,index);
+  if(!chunk)return res.status(404).json({error:'Файлын хэсэг олдсонгүй'});
+  res.json({data:Buffer.from(chunk.data).toString('base64')});
+});
 app.post('/api/login',(req,res) => {
   const {username,password}=req.body || {};
   const key=`${req.ip}:${String(username || '')}`;

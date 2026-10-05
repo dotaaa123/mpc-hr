@@ -1,3 +1,5 @@
+import { haulCapacityForPark } from '../shared/productionReference.js';
+
 // Active park numbers transcribed from the user supplied dispatcher fleet list.
 const excavators = [
   ['EX-01','FR800F'],['EX-02','FR800F'],['EX-03','FR800F'],['EX-04','FR1000F'],
@@ -11,7 +13,7 @@ const hauls = [
 const rentals = [['DZ-01','FD320','Бульдозер'],['DZ-02','FD320','Бульдозер'],['LO-01','FL955F','Авто ачигч'],['LO-03','FL955F','Авто ачигч'],['LO-04','FL955F','Авто ачигч'],['GR-01','FPY210','Автогрейдер'],['FT-01','Faw','Түлшний машин'],['WT-01','Dongfeng','Усны машин']];
 export const activeFleet = [
   ...excavators.map(([parkNo,model])=>({parkNo,model,kind:parkNo.startsWith('LO')?'Авто ачигч':'Экскаватор'})),
-  ...hauls.map(([parkNo,model])=>({parkNo,model,kind:'Дамп'})),
+  ...hauls.map(([parkNo,model])=>({parkNo,model,kind:'Дамп',haulCapacity:haulCapacityForPark(parkNo)})),
   ...rentals.map(([parkNo,model,kind])=>({parkNo,model,kind})),
 ];
 

@@ -48,7 +48,7 @@ export async function parseProductionWorkbook(file) {
       issues.push(`Actual!${n}: ээлж, техник, материал, рейс, багтаамж эсвэл тооцоолсон м³ зөрсөн`);
       continue;
     }
-    rows.push({date:day,kind:'actual',shift,haulParkNo:haul,excavatorParkNo:excavator,pit:string(row.getCell(11)),block:string(row.getCell(12)),level:string(row.getCell(13)),material,materialType:string(row.getCell(15))||material,race,capacity,amount:cached,dump:string(row.getCell(17)),sourceFile:filename,sourceSheet:'Actual',sourceRow:n});
+    rows.push({date:day,startDate:day,endDate:day,kind:'actual',shift,haulParkNo:haul,excavatorParkNo:excavator,pit:string(row.getCell(11)),block:string(row.getCell(12)),level:string(row.getCell(13)),material,materialType:string(row.getCell(15))||material,race,capacity,amount:cached,dump:string(row.getCell(17)),sourceFile:filename,sourceSheet:'Actual',sourceRow:n});
   }
   const planRows=[];
   for (let n=3;n<=plan.rowCount;n++) {
@@ -60,7 +60,7 @@ export async function parseProductionWorkbook(file) {
     if (!material || !Number.isFinite(amount) || amount<=0) continue;
     const excavatorParkNo=normalizeParkNo(string(row.getCell(8)));
     if (!excavatorParkNo) {issues.push(`Plan!${n}: ачигчийн парк дугааргүй`);continue}
-    planRows.push({date:day,kind:'plan',excavatorParkNo,pit:string(row.getCell(9)),block:string(row.getCell(10)),level:string(row.getCell(11)),material,materialType:string(row.getCell(13))||material,amount,dump:string(row.getCell(14)),sourceFile:filename,sourceSheet:'Plan',sourceRow:n});
+    planRows.push({date:day,startDate:day,endDate:day,kind:'plan',excavatorParkNo,pit:string(row.getCell(9)),block:string(row.getCell(10)),level:string(row.getCell(11)),material,materialType:string(row.getCell(13))||material,amount,dump:string(row.getCell(14)),sourceFile:filename,sourceSheet:'Plan',sourceRow:n});
   }
   if (!rows.length) throw new Error('Actual хуудаснаас импортлох бодит рейс олдсонгүй');
   const dates=rows.map(row=>row.date).sort();

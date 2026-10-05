@@ -1,5 +1,5 @@
 import express from 'express';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { parseAllData } from './allData.js';
@@ -93,7 +93,7 @@ async function audit(req, page, action, recordId, details = {}, db) {
 }
 const changesBetween=(before,after)=>Object.fromEntries(Object.keys(after).filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,{before:before[key]??null,after:after[key]??null}]));
 app.use('/api', (req, res, next) => {
-  if (['/login','/health'].includes(req.path)) return next();
+  if (['/login','/health','/desktop-release/latest'].includes(req.path) || /^\/desktop-release\/\d+\/chunks\/\d+$/.test(req.path)) return next();
   auth(req, res, async () => {
     try {
       const projectId = req.user.role === 'admin' && req.headers['x-project-id'] ? Number(req.headers['x-project-id']) : Number(req.user.projectId);
@@ -114,6 +114,7 @@ async function validate(type, body, db) {
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=await get('employees',id,db);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
+  if (type === 'equipment' && value.haulCapacity !== undefined && (!Number.isFinite(Number(value.haulCapacity)) || Number(value.haulCapacity) <= 0)) throw new Error('Нэг рейсийн багтаамж 0-ээс их байх ёстой');
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db), await all('attendance', db), await all('shiftOverrides', db));
   if (type === 'productionEntries') validateProduction(value);
   if (type === 'assignments' && !value.employeeId && !value.equipmentId) throw new Error('Ажилтан эсвэл техник сонгоно уу');
@@ -126,7 +127,8 @@ async function validate(type, body, db) {
   if (type === 'machineLogs' && value.shiftGroup && !['A','B','C','D'].includes(value.shiftGroup)) throw new Error('A/B/C/D ээлж буруу байна');
   if (type === 'machineLogs' && value.employeeId && !value.shiftGroup) throw new Error('Операторын A/B/C/D ээлжийг сонгоно уу');
   if (type === 'machineLogs' && value.employeeId && (await get('employees',value.employeeId,db))?.shiftGroup !== value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
-  if (type === 'machineLogs' && (Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type === 'machineLogs' && (!Number.isFinite(Number(value.startHours)) || !Number.isFinite(Number(value.endHours)) || Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
+  if (type === 'machineLogs') value.workedMotorHours=Number((Number(value.endHours)-Number(value.startHours)).toFixed(2));
   if (type === 'machineLogs') validateShiftHours(value);
   if (type === 'machineLogs' && value.endKm !== undefined && Number(value.endKm) < Number(value.startKm || 0)) throw new Error('Төгсгөлийн км эхлэлээс бага байж болохгүй');
   if (['travelExpenses','campStays','mealFeedback','bedAssignments'].includes(type) && value.employeeId && !await get('employees', value.employeeId, db)) throw new Error('Ажилтан олдсонгүй');
@@ -241,6 +243,52 @@ async function undoShiftOverride(overrideId, db) {
   }
 }
 const bad = (res, error) => res.status(400).json({ error: error.message });
+
+const releaseChunkBytes = 1024 * 1024;
+const releaseMaxBytes = 250 * 1024 * 1024;
+const releaseInfo = row => row && ({ id:Number(row.id), filename:row.filename, version:row.version, size:Number(row.size_bytes), sha256:row.sha256, chunkCount:row.chunk_count, createdAt:row.created_at });
+app.get('/api/desktop-release/latest', async (_req,res) => {
+  const row=(await query('SELECT * FROM public.desktop_releases WHERE published=true ORDER BY id DESC LIMIT 1')).rows[0];
+  res.json(releaseInfo(row)||null);
+});
+app.post('/api/desktop-release', admin, async (req,res) => {
+  const {filename,version,size,sha256}=req.body||{};
+  if(!/^[^/\\]{1,150}\.zip$/i.test(String(filename||''))||!/^[0-9a-zA-Z._-]{1,40}$/.test(String(version||''))||!Number.isSafeInteger(size)||size<1||size>releaseMaxBytes||!/^[a-f0-9]{64}$/i.test(String(sha256||'')))return res.status(400).json({error:'ZIP файл, хувилбар, хэмжээ эсвэл SHA-256 буруу байна'});
+  await query("DELETE FROM public.desktop_releases WHERE published=false AND created_at<now()-interval '7 days'");
+  const row=(await query('INSERT INTO public.desktop_releases(filename,version,size_bytes,sha256,chunk_count,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[filename,version,size,sha256.toLowerCase(),Math.ceil(size/releaseChunkBytes),req.user.id])).rows[0];
+  res.status(201).json(releaseInfo(row));
+});
+app.put('/api/desktop-release/:id/chunks/:index', admin, async (req,res) => {
+  const id=Number(req.params.id),index=Number(req.params.index);
+  const release=(await query('SELECT * FROM public.desktop_releases WHERE id=$1',[id])).rows[0];
+  if(!release||release.published||!Number.isInteger(index)||index<0||index>=release.chunk_count)return res.status(404).json({error:'Хувилбар эсвэл хэсэг олдсонгүй'});
+  const base64=req.body?.data;
+  if(typeof base64!=='string'||!/^[A-Za-z0-9+/]*={0,2}$/.test(base64))return res.status(400).json({error:'Файлын хэсэг буруу байна'});
+  const data=Buffer.from(base64,'base64'),expected=Math.min(releaseChunkBytes,Number(release.size_bytes)-index*releaseChunkBytes);
+  if(data.length!==expected)return res.status(400).json({error:'Файлын хэсгийн хэмжээ буруу байна'});
+  await query('INSERT INTO public.desktop_release_chunks(release_id,chunk_index,data) VALUES($1,$2,$3) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=$3',[id,index,data]);
+  res.json({ok:true,index});
+});
+app.post('/api/desktop-release/:id/publish', admin, async (req,res) => {
+  const id=Number(req.params.id),release=(await query('SELECT * FROM public.desktop_releases WHERE id=$1',[id])).rows[0];
+  if(!release||release.published)return res.status(404).json({error:'Нийтлээгүй хувилбар олдсонгүй'});
+  const chunks=(await query('SELECT chunk_index,data FROM public.desktop_release_chunks WHERE release_id=$1 ORDER BY chunk_index',[id])).rows;
+  if(!chunks.length||Buffer.from(chunks[0].data).subarray(0,4).toString('hex')!=='504b0304')return res.status(400).json({error:'ZIP файл биш байна'});
+  const hash=createHash('sha256');let bytes=0;
+  for(let i=0;i<chunks.length;i++){if(chunks[i].chunk_index!==i)break;hash.update(chunks[i].data);bytes+=chunks[i].data.length}
+  if(chunks.length!==release.chunk_count||bytes!==Number(release.size_bytes)||hash.digest('hex')!==release.sha256)return res.status(400).json({error:'Файл бүрэн бус эсвэл шалгах дүн зөрсөн байна'});
+  await withTransaction(async db=>{await query('UPDATE public.desktop_releases SET published=false WHERE published=true',[],db);await query('UPDATE public.desktop_releases SET published=true WHERE id=$1',[id],db)});
+  await audit(req,'desktopRelease','publish',id,{filename:release.filename,version:release.version,sha256:release.sha256});
+  await query('DELETE FROM public.desktop_releases WHERE id NOT IN (SELECT id FROM public.desktop_releases ORDER BY id DESC LIMIT 2)');
+  res.json({...releaseInfo(release),published:true});
+});
+app.get('/api/desktop-release/:id/chunks/:index', async (req,res) => {
+  const id=Number(req.params.id),index=Number(req.params.index),release=(await query('SELECT published,chunk_count FROM public.desktop_releases WHERE id=$1',[id])).rows[0];
+  if(!release?.published||!Number.isInteger(index)||index<0||index>=release.chunk_count)return res.status(404).json({error:'Файл олдсонгүй'});
+  const chunk=(await query('SELECT data FROM public.desktop_release_chunks WHERE release_id=$1 AND chunk_index=$2',[id,index])).rows[0];
+  if(!chunk)return res.status(404).json({error:'Файлын хэсэг олдсонгүй'});
+  res.json({data:chunk.data.toString('base64')});
+});
 
 app.post('/api/login', async (req, res) => {
   const username = String(req.body?.username || '');

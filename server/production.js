@@ -2,6 +2,9 @@ import { normalizeParkNo } from '../shared/parkNo.js';
 
 export function validateProduction(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value.date || '')) || Number.isNaN(Date.parse(`${value.date}T00:00:00Z`)) || new Date(`${value.date}T00:00:00Z`).toISOString().slice(0,10)!==value.date) throw new Error('Бүтээлийн огноо буруу байна');
+  for (const key of ['startDate','endDate']) if (value[key] && (!/^\d{4}-\d{2}-\d{2}$/.test(String(value[key])) || Number.isNaN(Date.parse(`${value[key]}T00:00:00Z`)) || new Date(`${value[key]}T00:00:00Z`).toISOString().slice(0,10)!==value[key])) throw new Error('Эхэлсэн эсвэл дууссан огноо буруу байна');
+  if (Boolean(value.startDate) !== Boolean(value.endDate)) throw new Error('Эхэлсэн болон дууссан огноог хамт оруулна уу');
+  if (value.startDate && value.endDate && value.endDate < value.startDate) throw new Error('Дууссан огноо эхэлсэн огнооноос өмнө байж болохгүй');
   value.haulParkNo=normalizeParkNo(value.haulParkNo);
   value.excavatorParkNo=normalizeParkNo(value.excavatorParkNo);
   if (!['actual','plan'].includes(value.kind)) throw new Error('Бүтээлийн төрөл буруу байна');
