@@ -1,6 +1,6 @@
 # MPC HR Flutter client
 
-This Flutter client runs on Windows, macOS, Linux, Android, iOS, and Web. It opens the existing MPC HR web application, so the same pages, API calls, and account permissions are used. The configured server address is saved on the device. Set `APP_URL` at build time to prefill the production address.
+This Flutter client runs on Windows, macOS, Linux, Android, iOS, and Web. It opens the existing MPC HR web application, so the same pages, API calls, and account permissions are used. The configured server address is saved on the device. It opens the production site by default; set `APP_URL` at build time to use a different server.
 
 ## Run locally
 
@@ -18,10 +18,11 @@ On macOS, `desktop/macos/Podfile` is included. If CocoaPods cannot write its cac
 
 ## Build Windows installer
 
-Run on Windows after installing Flutter 3.47+, Visual Studio 2022 Desktop development with C++, NuGet CLI, and Inno Setup 6:
+Run on Windows after installing Flutter 3.47+, Visual Studio 2022 Desktop development with C++, NuGet CLI, and Inno Setup 6. The production address `https://mpc-hr.vercel.app` is prefilled. Set `MPC_HR_URL` only when building for another server:
 
 ```powershell
-$env:MPC_HR_URL = "https://your-project.vercel.app"
+# Optional server override:
+# $env:MPC_HR_URL = "https://your-project.vercel.app"
 ./build_windows.ps1 -Version "1.0.0"
 ```
 

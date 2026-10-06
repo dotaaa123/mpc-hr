@@ -4,6 +4,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+if (-not $AppUrl) { $AppUrl = "https://mpc-hr.vercel.app" }
 if ($AppUrl -and $AppUrl -notmatch '^https://') { throw "AppUrl нь HTTPS хаяг байх ёстой." }
 if (-not (Get-Command nuget -ErrorAction SilentlyContinue)) { throw "NuGet CLI-г суулгаж PATH-д нэмнэ үү." }
 flutter pub get

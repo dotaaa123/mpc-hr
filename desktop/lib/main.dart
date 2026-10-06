@@ -5,7 +5,10 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const configuredUrl = String.fromEnvironment('APP_URL');
+const configuredUrl = String.fromEnvironment(
+  'APP_URL',
+  defaultValue: 'https://mpc-hr.vercel.app',
+);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const DesktopApp());

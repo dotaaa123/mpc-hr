@@ -114,6 +114,17 @@ async function validate(type, body, db) {
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type === 'equipment') { value.status ||= 'ready'; value.availability ||= value.status === 'ready' ? 'available' : 'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=await get('employees',id,db);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
+  if (type === 'equipmentTransfers') {
+    if (Number(value.removedEquipmentId) === Number(value.installedEquipmentId)) throw new Error('Сэлбэгийг нэг техникээс салгаж мөн тэр техник дээр суурилуулах боломжгүй');
+    if (!await get('equipment', value.removedEquipmentId, db) || !await get('equipment', value.installedEquipmentId, db)) throw new Error('Салгасан болон суурилуулсан техникийг сонгоно уу');
+    if (!Number.isInteger(Number(value.quantity)) || Number(value.quantity) <= 0) throw new Error('Тоо ширхэг 0-ээс их бүхэл тоо байна');
+    if (value.condition && !['new','used','repaired'].includes(value.condition)) throw new Error('Сэлбэгийн төлөв буруу байна');
+    for (const key of ['removedHours','installedHours','installedKm']) if (value[key] !== undefined && value[key] !== '' && (!Number.isFinite(Number(value[key])) || Number(value[key]) < 0)) throw new Error('Мото цаг болон км 0-ээс бага байж болохгүй');
+    if ([value.installedHours,value.installedKm].every(entry=>entry === undefined || entry === '')) throw new Error('Суурилуулах үеийн мото цаг эсвэл км-ийн нэгийг оруулна уу');
+    if (value.performedBy && !await get('employees', value.performedBy, db)) throw new Error('Ажил гүйцэтгэсэн хүнийг сонгоно уу');
+    for (const key of ['removedDate','installedDate']) if (!/^\d{4}-\d{2}-\d{2}$/.test(value[key]) || Number.isNaN(Date.parse(`${value[key]}T00:00:00Z`)) || new Date(`${value[key]}T00:00:00Z`).toISOString().slice(0,10) !== value[key]) throw new Error('Салгасан болон суурилуулсан огноог YYYY-MM-DD хэлбэрээр оруулна уу');
+    if (value.removedDate > value.installedDate) throw new Error('Суурилуулсан огноо салгасан огнооноос өмнө байж болохгүй');
+  }
   if (type === 'equipment' && value.haulCapacity !== undefined && (!Number.isFinite(Number(value.haulCapacity)) || Number(value.haulCapacity) <= 0)) throw new Error('Нэг рейсийн багтаамж 0-ээс их байх ёстой');
   if (type === 'plans') buildPlanSchedule(value, await all('employees', db), await all('equipment', db), await all('attendance', db), await all('shiftOverrides', db));
   if (type === 'productionEntries') validateProduction(value);
@@ -397,7 +408,7 @@ app.get('/api/documents/:id/pdf',auth,documentEditor,async(req,res)=>{
   if(!row)return res.status(404).json({error:'Баримт олдсонгүй'});
   res.set({'Content-Type':'application/pdf','Content-Disposition':`inline; filename="hr-${row.kind}-${req.params.id}.pdf"`,'Cache-Control':'private, no-store'}).send(row.pdf);
 });
-app.delete('/api/documents/:id',auth,admin,async(req,res)=>{
+app.delete('/api/documents/:id',auth,documentEditor,async(req,res)=>{
   const {rows}=await query('DELETE FROM public.documents WHERE id=$1 AND project_id=$2 RETURNING id,employee_id,kind',[Number(req.params.id),currentProject()]);
   if(!rows[0])return res.status(404).json({error:'Баримт олдсонгүй'});
   await audit(req,'documents','delete',rows[0].id,{employeeId:rows[0].employee_id,kind:rows[0].kind});res.json({ok:true});
@@ -508,7 +519,7 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   for(const row of recordResult.rows)grouped[row.type].push(rowRecord(row));
   const employees=grouped.employees,assignments=grouped.assignments;
   const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
-  const permissions = req.user.role==='admin' ? Object.fromEntries(types.map(type=>[type,['read','create','update','delete']])) : { ...(defaultPermissions[req.user.role] || {}), ...(permissionRows[0]?.permissions || {}) };
+  const permissions = req.user.role==='admin' ? Object.fromEntries([...types,'documents'].map(type=>[type,['read','create','update','delete']])) : { ...(defaultPermissions[req.user.role] || {}), ...(permissionRows[0]?.permissions || {}) };
   const records=Object.fromEntries(types.map(type=>[type,permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
   res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,projectId:currentProject()});
 });
