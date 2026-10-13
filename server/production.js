@@ -11,6 +11,7 @@ export function validateProduction(value) {
   if (!String(value.material || '').trim()) throw new Error('Материал сонгоно уу');
   if (!Number.isFinite(Number(value.amount)) || Number(value.amount) < 0) throw new Error('Бүтээлийн хэмжээ 0-ээс бага байж болохгүй');
   if (value.kind === 'actual') {
+    value.shift=String(value.shift ?? '').trim().toLowerCase();
     if (!['day','night'].includes(value.shift)) throw new Error('Өдөр эсвэл шөнийн ээлж сонгоно уу');
     if (!String(value.haulParkNo || '').trim() || !String(value.excavatorParkNo || '').trim()) throw new Error('Автосамосвал болон ачигчийн парк дугаар оруулна уу');
     if (!Number.isInteger(Number(value.race)) || Number(value.race) < 1) throw new Error('Рейсийн тоо 1-ээс бага байж болохгүй');
