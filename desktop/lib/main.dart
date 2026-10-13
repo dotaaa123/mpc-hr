@@ -5,6 +5,8 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'save_file.dart';
+
 const configuredUrl = String.fromEnvironment(
   'APP_URL',
   defaultValue: 'https://mpc-hr.vercel.app',
@@ -159,8 +161,23 @@ class _DesktopHomeState extends State<DesktopHome> {
                         supportMultipleWindows: false,
                         isInspectable: kDebugMode,
                       ),
-                      onWebViewCreated: (controller) =>
-                          webController = controller,
+                      onWebViewCreated: (controller) {
+                        webController = controller;
+                        controller.addJavaScriptHandler(
+                          handlerName: 'mpcSaveExcel',
+                          callback: (JavaScriptHandlerFunctionData data) async {
+                            final page = Uri.tryParse(url ?? '');
+                            final origin = Uri.tryParse(data.origin.toString());
+                            if (!data.isMainFrame ||
+                                page == null ||
+                                origin == null ||
+                                page.origin != origin.origin) {
+                              return {'ok': false, 'error': 'Файлын эх сурвалж буруу'};
+                            }
+                            return saveExcelFile(data.args);
+                          },
+                        );
+                      },
                       onProgressChanged: (_, value) {
                         if (mounted) setState(() => progress = value / 100);
                       },

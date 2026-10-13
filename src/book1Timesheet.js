@@ -1,5 +1,6 @@
 // Book1.xlsx-ийн ирцийн өдөр тутмын багана, сарын хоёр хагасын бүтэц.
 // Эх Excel-ийн ажилтны мэдээлэл болон эвдэрсэн томьёог хуулж нийтлэхгүй.
+import { saveBlob } from './fileDownload.js';
 export const attendanceCode = {arrival:'Ир',day:'Өд',departure:'Бу',night:'Шө',travel:'Зам',rest:'Ам',leave:'Ч',absent:'Т'};
 
 export function monthDates(month) {
@@ -56,5 +57,5 @@ export async function exportBook1Timesheet({month,employees,attendance,includeSa
   sheet.getColumn(7).numFmt='#,##0.00';sheet.getColumn(8).numFmt='#,##0.00';
   const buffer=await workbook.xlsx.writeBuffer();
   const blob=new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-  const url=URL.createObjectURL(blob);const anchor=document.createElement('a');anchor.href=url;anchor.download=`цагийн-бүртгэл-${month}.xlsx`;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  return saveBlob(blob,`цагийн-бүртгэл-${month}.xlsx`);
 }
