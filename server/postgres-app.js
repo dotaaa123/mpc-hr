@@ -335,7 +335,12 @@ app.put('/api/desktop-release/:id/chunks/:index', admin, async (req,res) => {
   if(typeof base64!=='string'||!/^[A-Za-z0-9+/]*={0,2}$/.test(base64))return res.status(400).json({error:'Файлын хэсэг буруу байна'});
   const data=Buffer.from(base64,'base64'),expected=Math.min(releaseChunkBytes,Number(release.size_bytes)-index*releaseChunkBytes);
   if(data.length!==expected)return res.status(400).json({error:'Файлын хэсгийн хэмжээ буруу байна'});
-  await query('INSERT INTO public.desktop_release_chunks(release_id,chunk_index,data) VALUES($1,$2,$3) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=$3',[id,index,data]);
+  try {
+    await query('INSERT INTO public.desktop_release_chunks(release_id,chunk_index,data) VALUES($1,$2,$3) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=$3',[id,index,data]);
+  } catch (error) {
+    console.error('Desktop release chunk storage:', error);
+    return res.status(500).json({ error:'Файлын хэсгийг хадгалж чадсангүй', code:error.code || error.name || 'unknown' });
+  }
   res.json({ok:true,index});
 });
 app.post('/api/desktop-release/:id/publish', admin, async (req,res) => {
