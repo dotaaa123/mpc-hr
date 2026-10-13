@@ -135,7 +135,7 @@ app.get('/api/mpc-integration',admin,async(req,res)=>{
 app.put('/api/mpc-integration',admin,async(req,res)=>{
   const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'');
   if(!username||!password)return res.status(400).json({error:'MPC API нэвтрэх нэр, нууц үг оруулна уу'});
-  try{const encrypted=sealCredentials({username,password});await query('INSERT INTO public.mpc_integrations(project_id,credential_ciphertext) VALUES($1,$2) ON CONFLICT(project_id) DO UPDATE SET credential_ciphertext=excluded.credential_ciphertext,updated_at=now()',[currentProject(),encrypted]);res.json({configured:true})}
+  try{const encrypted=sealCredentials({username,password});await query('INSERT INTO public.mpc_integrations(project_id,credential_ciphertext) VALUES($1,$2) ON CONFLICT(project_id) DO UPDATE SET credential_ciphertext=excluded.credential_ciphertext,updated_at=now()',[currentProject(),encrypted]);await audit(req,'mpcIntegration','update',null,{configured:true});res.json({configured:true})}
   catch(error){res.status(500).json({error:error.message})}
 });
 app.get('/api/mpc-read/:view',async(req,res)=>{
