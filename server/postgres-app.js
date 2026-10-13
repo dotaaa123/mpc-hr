@@ -119,7 +119,7 @@ async function audit(req, page, action, recordId, details = {}, db) {
 }
 const changesBetween=(before,after)=>Object.fromEntries(Object.keys(after).filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,{before:before[key]??null,after:after[key]??null}]));
 app.use('/api', (req, res, next) => {
-  if (['/login','/health','/desktop-release/latest'].includes(req.path) || /^\/desktop-release\/\d+\/chunks\/\d+$/.test(req.path)) return next();
+  if (['/login','/health','/desktop-release/latest'].includes(req.path) || (req.method === 'GET' && /^\/desktop-release\/\d+\/chunks\/\d+$/.test(req.path))) return next();
   auth(req, res, async () => {
     try {
       const projectId = req.user.role === 'admin' && req.headers['x-project-id'] ? Number(req.headers['x-project-id']) : Number(req.user.projectId);
@@ -335,12 +335,7 @@ app.put('/api/desktop-release/:id/chunks/:index', admin, async (req,res) => {
   if(typeof base64!=='string'||!/^[A-Za-z0-9+/]*={0,2}$/.test(base64))return res.status(400).json({error:'Файлын хэсэг буруу байна'});
   const data=Buffer.from(base64,'base64'),expected=Math.min(releaseChunkBytes,Number(release.size_bytes)-index*releaseChunkBytes);
   if(data.length!==expected)return res.status(400).json({error:'Файлын хэсгийн хэмжээ буруу байна'});
-  try {
-    await query('INSERT INTO public.desktop_release_chunks(release_id,chunk_index,data) VALUES($1,$2,$3) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=$3',[id,index,data]);
-  } catch (error) {
-    console.error('Desktop release chunk storage:', error);
-    return res.status(500).json({ error:'Файлын хэсгийг хадгалж чадсангүй', code:error.code || error.name || 'unknown' });
-  }
+  await query('INSERT INTO public.desktop_release_chunks(release_id,chunk_index,data) VALUES($1,$2,$3) ON CONFLICT(release_id,chunk_index) DO UPDATE SET data=$3',[id,index,data]);
   res.json({ok:true,index});
 });
 app.post('/api/desktop-release/:id/publish', admin, async (req,res) => {
@@ -932,11 +927,7 @@ app.post('/api/submissions/batch', auth, async (req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error('MPC HR API error:', error);
-  if (!res.headersSent) res.status(error.status === 413 ? 413 : 500).json({
-    error: error.status === 413 ? 'Хүсэлтийн хэмжээ хэтэрлээ' : 'Серверийн алдаа. Supabase холболт болон тохиргоог шалгана уу.',
-    code: error.code || error.type || error.name || 'unknown',
-    detail: _req.path.startsWith('/api/desktop-release/') ? String(error.message || '').slice(0,160) : undefined,
-  });
+  if (!res.headersSent) res.status(500).json({ error: 'Серверийн алдаа. Supabase холболт болон тохиргоог шалгана уу.' });
 });
 
 export default app;
