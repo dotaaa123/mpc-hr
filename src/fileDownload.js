@@ -4,7 +4,7 @@ export async function saveBlob(blob,filename) {
     const bytes=new Uint8Array(await blob.arrayBuffer());
     let binary='';
     for(let index=0;index<bytes.length;index+=16384)binary+=String.fromCharCode(...bytes.subarray(index,index+16384));
-    const result=await bridge('mpcSaveExcel',filename,btoa(binary));
+    const result=await window.flutter_inappwebview.callHandler('mpcSaveExcel',filename,btoa(binary));
     if (!result?.ok) throw new Error(result?.error||'Excel файлыг хадгалж чадсангүй');
     return result.path;
   }
