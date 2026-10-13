@@ -6,12 +6,14 @@ import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js'
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
+import { validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
+import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView } from './mpcRead.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -96,10 +98,10 @@ async function auth(req, res, next) {
 }
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
 const defaultPermissions = {
-  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],positions:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
-  clerk: { maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],positions:['read'],assignments:['read','update'] },
+  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],technicalReadiness:['read'],rosterEntries:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],positions:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
+  clerk: { maintenance:['read','create','update'],technicalReadiness:['read','create','update'],rosterEntries:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],positions:['read'],assignments:['read','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],positions:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
-  hr: { employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
+  hr: { employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],rosterEntries:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],technicalReadiness:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
 };
 const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
 async function allowed(req, page, action) {
@@ -126,6 +128,28 @@ app.use('/api', (req, res, next) => {
     } catch (error) { next(error); }
   });
 });
+app.get('/api/mpc-integration',admin,async(req,res)=>{
+  const row=(await query('SELECT 1 FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
+  res.json({configured:!!row});
+});
+app.put('/api/mpc-integration',admin,async(req,res)=>{
+  const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'');
+  if(!username||!password)return res.status(400).json({error:'MPC API нэвтрэх нэр, нууц үг оруулна уу'});
+  try{const encrypted=sealCredentials({username,password});await query('INSERT INTO public.mpc_integrations(project_id,credential_ciphertext) VALUES($1,$2) ON CONFLICT(project_id) DO UPDATE SET credential_ciphertext=excluded.credential_ciphertext,updated_at=now()',[currentProject(),encrypted]);res.json({configured:true})}
+  catch(error){res.status(500).json({error:error.message})}
+});
+app.get('/api/mpc-read/:view',async(req,res)=>{
+  const page=mpcPageKeys[req.params.view];
+  if(!page||!await allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
+  const row=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
+  if(!row)return res.status(503).json({error:'MPC API холболтыг админ тохиргоонд бүртгэнэ үү'});
+  try{const data=await readMpcView(req.params.view,openCredentials(row.credential_ciphertext));res.set('Cache-Control','no-store');res.json(data)}
+  catch(error){res.status(502).json({error:error.message})}
+});
+app.get('/api/readiness-operators',async(req,res)=>{
+  if(!await allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});
+  res.json((await all('employees')).map(({id,code,lastName,firstName,phone,branch})=>({id,code,lastName,firstName,phone,branch})));
+});
 
 async function validate(type, body, db) {
   const value = clean(type, body);
@@ -136,6 +160,12 @@ async function validate(type, body, db) {
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
   if(type==='payrollEntries') {if(!await get('employees',value.employeeId,db)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value.month))||!['first','second'].includes(value.half))throw new Error('Цалингийн ажилтан эсвэл хугацаа буруу байна');if(['plannedHours','workedHours','travelDays','baseSalary','extraPay','otherDeduction'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||['insuredShare','insuranceRate','taxRate'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0||Number(value[key])>1)))throw new Error('Цалингийн тоо эсвэл хувь буруу байна');if(value.skipPayroll!==undefined&&typeof value.skipPayroll!=='boolean'||value.skipPayroll&&!['rest','terminated','discipline','other','unknown'].includes(value.skipReason))throw new Error('Цалин бодохгүй шалтгааныг сонгоно уу')}
+  const employeeForRoster=type==='rosterEntries'?await get('employees',value.employeeId,db):null;
+  const equipmentForReadiness=type==='technicalReadiness'?await get('equipment',value.equipmentId,db):null;
+  const readinessOperators=new Map();
+  if(type==='technicalReadiness')for(const id of [value.dayOperatorId,value.nightOperatorId])if(id)readinessOperators.set(Number(id),await get('employees',id,db));
+  if(type==='rosterEntries')validateRosterEntry(value,id=>Number(id)===Number(value.employeeId)?employeeForRoster:null);
+  if(type==='technicalReadiness')validateTechnicalReadiness(value,id=>Number(id)===Number(value.equipmentId)?equipmentForReadiness:null,id=>readinessOperators.get(Number(id)));
   if (type === 'attendance' && (!await get('employees', value.employeeId, db) || !['day','night','travel','arrival','departure','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type === 'productionEntries' && value.operatorId && !await get('employees', value.operatorId, db)) throw new Error('Оператор олдсонгүй');
   if (type === 'attendance' && ['day','night'].includes(value.status) && (await all('shiftOverrides',db)).some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
@@ -195,13 +225,15 @@ async function validate(type, body, db) {
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
-  if (!['employees','positions','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs','payrollEntries'].includes(type)) return;
+  if (!['employees','positions','attendance','rosterEntries','technicalReadiness','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs','payrollEntries'].includes(type)) return;
   const rows = await all(type, db);
   if(type==='positions'&&rows.some(row=>row.id!==Number(excludeId)&&positionKey(row.name)===positionKey(value.name)))throw new Error('Ийм албан тушаал бүртгэлтэй байна');
   if (type === 'machineLogs' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && row.workShift === value.workShift && Number(row.equipmentId) === Number(value.equipmentId))) throw new Error('Энэ техникийн тухайн ээлжийн бүртгэл аль хэдийн байна');
   if (type === 'productionEntries' && productionSourceKey(value) && rows.some(row => row.id !== Number(excludeId) && productionSourceKey(row) === productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if(type==='payrollEntries'&&rows.some(row=>row.id!==Number(excludeId)&&Number(row.employeeId)===Number(value.employeeId)&&row.month===value.month&&row.half===value.half))throw new Error('Энэ ажилтны цалингийн хугацааны тохируулга бүртгэлтэй байна');
+  if(type==='rosterEntries'&&rows.some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId)))throw new Error('Энэ ажилтны тухайн өдрийн ростер бүртгэлтэй байна');
+  if(type==='technicalReadiness'&&rows.some(row=>row.id!==Number(excludeId)&&row.weekStart===value.weekStart&&Number(row.equipmentId)===Number(value.equipmentId)))throw new Error('Энэ техникийн тухайн 7 хоногийн төлөв бүртгэлтэй байна');
   if (type === 'attendance' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && Number(row.employeeId) === Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type === 'equipment' && rows.some(row => row.id !== Number(excludeId) && (value.vin && row.vin === value.vin || !value.vin && row.parkNo === value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
   if (type === 'campStays' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && (value.employeeId && Number(row.employeeId) === Number(value.employeeId) || value.guestId && Number(row.guestId) === Number(value.guestId)))) throw new Error('Энэ хүн тухайн өдөр camp-д бүртгэлтэй байна');

@@ -9,11 +9,19 @@ export const viewPages = [
   {key:'campCheck',label:'Хүмүүсээ шалгах',campOnly:true,source:'attendance'},
   {key:'tasks',label:'Ажлын хуваарь',source:'assignments'},
   {key:'reports',label:'Тайлан',adminOnly:true},
+  {key:'mpcItems',label:'MPC · Барааны жагсаалт',source:'equipment'},
+  {key:'mpcBalance',label:'MPC · Агуулахын үлдэгдэл',source:'equipment'},
+  {key:'mpcOrders',label:'MPC · Захиалга',source:'equipment'},
+  {key:'mpcPurchases',label:'MPC · Худалдан авалт',source:'equipment'},
+  {key:'mpcIncome',label:'MPC · Орлого, нэхэмжлэх',source:'equipment'},
+  {key:'mpcIssues',label:'MPC · Зарлага',source:'equipment'},
+  {key:'mpcTransfers',label:'MPC · Дотоод хөдөлгөөн',source:'equipment'},
   {key:'users',label:'Хэрэглэгчид',adminOnly:true},
   {key:'roles',label:'Эрхийн нэрс',adminOnly:true},
   {key:'permissions',label:'Эрхийн тохиргоо',adminOnly:true,alwaysVisible:true},
   {key:'audit',label:'Аудит лог',adminOnly:true},
   {key:'desktopRelease',label:'Windows програм',adminOnly:true},
+  {key:'mpcIntegration',label:'MPC API холболт',adminOnly:true},
 ];
 
 export const addViewPermissions = (role, base) => {

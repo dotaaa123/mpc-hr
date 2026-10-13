@@ -11,12 +11,14 @@ import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
+import { validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
+import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView } from './mpcRead.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -25,6 +27,7 @@ app.use(express.json({ limit: '10mb' }));
 const dataDir = path.resolve('data');
 mkdirSync(dataDir, { recursive: true });
 const db = new DatabaseSync(path.join(dataDir, 'mpc-hr.sqlite'));
+db.exec('CREATE TABLE IF NOT EXISTS mpc_integrations (project_id INTEGER PRIMARY KEY, credential_ciphertext TEXT NOT NULL, updated_at TEXT NOT NULL)');
 db.exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, password TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL);
@@ -91,7 +94,7 @@ function auth(req,res,next) {
   req.user=session; next();
 }
 const admin = (req,res,next) => req.user.role==='admin' ? next() : res.status(403).json({error:'Зөвхөн админ эрхтэй'});
-const defaultPermissions={dispatcher:{assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],positions:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],positions:['read'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],positions:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete']}};
+const defaultPermissions={dispatcher:{assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],technicalReadiness:['read'],rosterEntries:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],positions:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],technicalReadiness:['read','create','update'],rosterEntries:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],positions:['read'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],positions:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],rosterEntries:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],technicalReadiness:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete']}};
 const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
 const permissionsFor=user=>permissionMatrix(user.role,defaultPermissions[user.role]||{},JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions||'{}'),[...types,'documents']);
 const allowed=(req,page,action)=>Boolean(permissionsFor(req.user)[page]?.includes(action));
@@ -99,6 +102,25 @@ const editor=(req,res,next)=>allowed(req,req.params.type,req.method==='DELETE'?'
 function audit(req,page,action,recordId,details={}) {db.prepare('INSERT INTO audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES(?,?,?,?,?,?,?,?)').run(currentProject(),req.user.id,req.user.username,req.user.role,page,action,recordId||null,JSON.stringify(details))}
 const changesBetween=(before,after)=>Object.fromEntries(Object.keys(after).filter(key=>JSON.stringify(before[key])!==JSON.stringify(after[key])).map(key=>[key,{before:before[key]??null,after:after[key]??null}]));
 app.use('/api',(req,res,next)=>{if(['/login','/health','/desktop-release/latest'].includes(req.path)||/^\/desktop-release\/\d+\/chunks\/\d+$/.test(req.path))return next();auth(req,res,()=>{const projectId=req.user.role==='admin'&&req.headers['x-project-id']?Number(req.headers['x-project-id']):Number(req.user.projectId);if(!db.prepare('SELECT id FROM projects WHERE id=? AND active=1').get(projectId))return res.status(403).json({error:'Төсөл сонгоно уу'});projectContext.run({projectId},next)})});
+app.get('/api/mpc-integration',admin,(req,res)=>res.json({configured:!!db.prepare('SELECT 1 FROM mpc_integrations WHERE project_id=?').get(currentProject())}));
+app.put('/api/mpc-integration',admin,(req,res)=>{
+  const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'');
+  if(!username||!password)return res.status(400).json({error:'MPC API нэвтрэх нэр, нууц үг оруулна уу'});
+  try{const encrypted=sealCredentials({username,password});db.prepare('INSERT INTO mpc_integrations(project_id,credential_ciphertext,updated_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET credential_ciphertext=excluded.credential_ciphertext,updated_at=excluded.updated_at').run(currentProject(),encrypted,new Date().toISOString());res.json({configured:true})}
+  catch(error){res.status(500).json({error:error.message})}
+});
+app.get('/api/mpc-read/:view',async(req,res)=>{
+  const page=mpcPageKeys[req.params.view];
+  if(!page||!allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
+  const stored=db.prepare('SELECT credential_ciphertext FROM mpc_integrations WHERE project_id=?').get(currentProject());
+  if(!stored)return res.status(503).json({error:'MPC API холболтыг админ тохиргоонд бүртгэнэ үү'});
+  try{const data=await readMpcView(req.params.view,openCredentials(stored.credential_ciphertext));res.set('Cache-Control','no-store');res.json(data)}
+  catch(error){res.status(502).json({error:error.message})}
+});
+app.get('/api/readiness-operators',(req,res)=>{
+  if(!allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});
+  res.json(all('employees').map(({id,code,lastName,firstName,phone,branch})=>({id,code,lastName,firstName,phone,branch})));
+});
 function validate(type, body) {
   const value=clean(type,body);
   const missing=required[type].filter(k => value[k]===undefined || value[k]==='');
@@ -108,6 +130,8 @@ function validate(type, body) {
   if (type==='employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
   if(type==='payrollEntries') {if(!get('employees',value.employeeId)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value.month))||!['first','second'].includes(value.half))throw new Error('Цалингийн ажилтан эсвэл хугацаа буруу байна');if(['plannedHours','workedHours','travelDays','baseSalary','extraPay','otherDeduction'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||['insuredShare','insuranceRate','taxRate'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0||Number(value[key])>1)))throw new Error('Цалингийн тоо эсвэл хувь буруу байна');if(value.skipPayroll!==undefined&&typeof value.skipPayroll!=='boolean'||value.skipPayroll&&!['rest','terminated','discipline','other','unknown'].includes(value.skipReason))throw new Error('Цалин бодохгүй шалтгааныг сонгоно уу')}
+  if(type==='rosterEntries')validateRosterEntry(value,id=>get('employees',id));
+  if(type==='technicalReadiness')validateTechnicalReadiness(value,id=>get('equipment',id),id=>get('employees',id));
   if (type==='attendance' && (!get('employees',value.employeeId)||!['day','night','travel','arrival','departure','absent','rest','leave'].includes(value.status))) throw new Error('Ажилтан эсвэл төлөв буруу байна');
   if (type==='productionEntries' && value.operatorId && !get('employees',value.operatorId)) throw new Error('Оператор олдсонгүй');
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
@@ -159,6 +183,8 @@ function ensureUnique(type,value,excludeId) {
   if (type==='productionEntries'&&productionSourceKey(value)&&all(type).some(row=>row.id!==Number(excludeId)&&productionSourceKey(row)===productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type==='employees' && all(type).some(row=>row.id!==Number(excludeId)&&row.register===value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
   if(type==='payrollEntries'&&all(type).some(row=>row.id!==Number(excludeId)&&Number(row.employeeId)===Number(value.employeeId)&&row.month===value.month&&row.half===value.half))throw new Error('Энэ ажилтны цалингийн хугацааны тохируулга бүртгэлтэй байна');
+  if(type==='rosterEntries'&&all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId)))throw new Error('Энэ ажилтны тухайн өдрийн ростер бүртгэлтэй байна');
+  if(type==='technicalReadiness'&&all(type).some(row=>row.id!==Number(excludeId)&&row.weekStart===value.weekStart&&Number(row.equipmentId)===Number(value.equipmentId)))throw new Error('Энэ техникийн тухайн 7 хоногийн төлөв бүртгэлтэй байна');
   if (type==='attendance' && all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&Number(row.employeeId)===Number(value.employeeId))) throw new Error('Энэ ажилтны тухайн өдрийн цаг бүртгэл байна');
   if (type==='equipment' && all(type).some(row=>row.id!==Number(excludeId)&&(value.vin&&row.vin===value.vin||!value.vin&&row.parkNo===value.parkNo))) throw new Error('Энэ VIN эсвэл парк дугаартай техник бүртгэлтэй байна');
   if (type==='campStays'&&all(type).some(row=>row.id!==Number(excludeId)&&row.date===value.date&&(value.employeeId&&Number(row.employeeId)===Number(value.employeeId)||value.guestId&&Number(row.guestId)===Number(value.guestId)))) throw new Error('Энэ хүн тухайн өдөр camp-д бүртгэлтэй байна');

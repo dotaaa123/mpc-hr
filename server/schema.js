@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS public.role_definitions (
   builtin boolean NOT NULL DEFAULT false,
   PRIMARY KEY(project_id,key)
 );
+CREATE TABLE IF NOT EXISTS public.mpc_integrations (
+  project_id integer PRIMARY KEY REFERENCES public.projects(id) ON DELETE CASCADE,
+  credential_ciphertext text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS project_id integer REFERENCES public.projects(id);
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS employee_id integer;
 
