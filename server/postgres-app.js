@@ -935,6 +935,7 @@ app.use((error, _req, res, _next) => {
   if (!res.headersSent) res.status(error.status === 413 ? 413 : 500).json({
     error: error.status === 413 ? 'Хүсэлтийн хэмжээ хэтэрлээ' : 'Серверийн алдаа. Supabase холболт болон тохиргоог шалгана уу.',
     code: error.code || error.type || error.name || 'unknown',
+    detail: _req.path.startsWith('/api/desktop-release/') ? String(error.message || '').slice(0,160) : undefined,
   });
 });
 
