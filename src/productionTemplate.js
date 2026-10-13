@@ -14,7 +14,7 @@ export async function saveProductionTemplate(fields) {
   for(const [index,field] of fields.entries()){
     const column=index+1;
     if(field.required)sheet.getCell(1,column).note='Заавал бөглөнө';
-    if(['date','startDate','endDate'].includes(field.key))sheet.getColumn(column).numFmt='yyyy-mm-dd';
+    if(field.key==='date')sheet.getColumn(column).numFmt='yyyy-mm-dd';
     if(field.key==='kind'||field.key==='shift'){
       const values=field.key==='kind'?['actual','plan']:['day','night'];
       for(let row=2;row<=500;row++)sheet.getCell(row,column).dataValidation={type:'list',allowBlank:field.key==='shift',formulae:[`"${values.join(',')}"`],showErrorMessage:true,error:'Жагсаалтаас утга сонгоно уу'};
@@ -26,7 +26,7 @@ export async function saveProductionTemplate(fields) {
     ['Төрөл','actual = бодит гүйцэтгэл, plan = төлөвлөгөө. Жагсаалтаас сонгоно.'],
     ['Өдөр / шөнө','Бодит гүйцэтгэлд day эсвэл night сонгоно.'],
     ['Операторын код','Ажилтан хуудсанд бүртгэсэн давтагдашгүй кодыг бичнэ. Нэр эсвэл регистр бичихгүй.'],
-    ['Огноо','Бүртгэлийн өдөр, эхэлсэн, дууссан огноог YYYY-MM-DD хэлбэрээр оруулна.'],
+    ['Огноо','Зөвхөн бүртгэлийн өдрийг YYYY-MM-DD хэлбэрээр оруулна.'],
     ['Бодит гүйцэтгэл','Автосамосвал, ачигч, рейс, багтаамж, бүтээл м³-г бөглөнө. Бүтээл = рейс × багтаамж.'],
     ['Төлөвлөгөө','Ачигч, материал, материалын төрөл, бүтээл м³-г бөглөнө.'],
     ['Парк дугаар','Техник хуудсанд бүртгэлтэй парк дугаарыг ашиглана.'],

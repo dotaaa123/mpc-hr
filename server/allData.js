@@ -14,7 +14,7 @@ export async function parseAllData(buffer) {
   const grid=Array.from({length:sheet.rowCount},(_,index)=>Array.from({length:sheet.columnCount},(_,col)=>sheet.getRow(index+1).getCell(col+1).text));
   const headers=grid[1];
   if (!headers || cell(headers,10).toUpperCase()!=='VIN') throw new Error('ALL DATA sheet-ийн 2-р мөрөнд VIN багана олдсонгүй');
-  const records=grid.slice(2).filter(row=>cell(row,10)).map((row,index)=>{
+  const records=grid.slice(2).map((row,index)=>({row,sourceRow:index+3})).filter(({row})=>cell(row,10)||cell(row,13)).map(({row,sourceRow})=>{
     const sourceData=Object.fromEntries(headers.map((heading,col)=>[column(col),{heading:String(heading || '').trim(),value:row[col] ?? ''}]));
     const sourceStatus=cell(row,30);
     const availability=/агуулах/i.test(sourceStatus)?'available':/ашиглаж/i.test(sourceStatus)?'assigned':/борлуул/i.test(sourceStatus)?'sold':'inactive';
@@ -27,9 +27,32 @@ export async function parseAllData(buffer) {
       year:cell(row,11),sourceStatus,contractNo:cell(row,1),contractCompany:cell(row,4),
       unitPriceMnt:numeric(row[16]),currency:cell(row,15),warranty:cell(row,37),
       certificate:cell(row,41),customsDocument:cell(row,43),passport:cell(row,44),
-      sourceSheet:'ALL DATA',sourceRow:index+3,sourceData,
+      sourceSheet:'ALL DATA',sourceRow,sourceData,
       notes:cell(row,12),
     };
   });
   return {records,totalRows:grid.length-2};
+}
+
+export function applyAllDataEdits(records, overrides=[], excludedRows=[]) {
+  const changes=new Map(overrides.map(item=>[Number(item.sourceRow),item.values||{}]));
+  const excluded=new Set(excludedRows.map(Number));
+  return records.filter(row=>!excluded.has(Number(row.sourceRow))).map(row=>{
+    const edit=changes.get(Number(row.sourceRow));
+    if(!edit)return row;
+    return {...row,...Object.fromEntries(Object.keys(row).filter(key=>!['sourceData','sourceSheet','sourceRow'].includes(key)&&Object.hasOwn(edit,key)).map(key=>[key,edit[key]]))};
+  });
+}
+
+export async function checkAllDataRows(rows,validateRow) {
+  const issues=[];const seen=new Set();
+  for(const [index,row] of rows.entries()){
+    const errors=[];const vin=String(row.vin||'').trim().toUpperCase();
+    if(!vin)errors.push('VIN оруулна уу');
+    else if(seen.has(vin))errors.push('VIN файл дотор давхардсан');
+    if(vin)seen.add(vin);
+    try{await validateRow(row)}catch(error){errors.push(error.message)}
+    if(errors.length)issues.push({row:Number(row.sourceRow)||index+3,sheet:'ALL DATA',message:errors.join('; ')});
+  }
+  return issues;
 }

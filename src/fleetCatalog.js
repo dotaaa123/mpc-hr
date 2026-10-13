@@ -18,21 +18,30 @@ export const activeFleet = [
 ];
 
 const text = cell => String(cell?.value ?? '').trim();
+export function matchFleetSerialRows(sourceRows) {
+  const active=new Map(activeFleet.map(row=>[row.parkNo,row]));
+  const exact=new Map();const unmatched=[];const issues=[];
+  for(const row of sourceRows){
+    const parkNo=String(row.parkNo||'').trim().toUpperCase();
+    const vin=String(row.vin||'').trim();
+    if(!parkNo||!vin){issues.push({row:row.sourceRow,sheet:'СЕРИАЛ ДУГААРУУД',message:!parkNo?'Парк дугаар оруулна уу':'VIN оруулна уу'});continue}
+    if(!active.has(parkNo)){unmatched.push({row:row.sourceRow,parkNo});issues.push({row:row.sourceRow,sheet:'СЕРИАЛ ДУГААРУУД',message:`${parkNo} парк идэвхтэй жагсаалтад байхгүй`});continue}
+    if(exact.has(parkNo)){issues.push({row:row.sourceRow,sheet:'СЕРИАЛ ДУГААРУУД',message:`${parkNo} парк дугаар файл дотор давхардсан`});continue}
+    exact.set(parkNo,{vin,brand:row.brand,plateNo:row.plateNo,year:row.year,sourceSheet:'СЕРИАЛ ДУГААРУУД',sourceRow:row.sourceRow});
+  }
+  return {sourceRows,records:activeFleet.map(row=>({...row,...(exact.get(row.parkNo)||{}),status:'inactive',availability:'inactive',site:'Ууцар'})),matched:exact.size,unmatched,issues};
+}
 export async function matchFleetSerials(file) {
   const {default:ExcelJS}=await import('exceljs');
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(await file.arrayBuffer());
   const sheet=workbook.getWorksheet('СЕРИАЛ ДУГААРУУД');
   if(!sheet||text(sheet.getCell('F2'))!=='СЕРИЙН ДУГААР')throw new Error('Техникийн мэдээллийн СЕРИАЛ ДУГААРУУД хуудас олдсонгүй');
-  const active=new Map(activeFleet.map(row=>[row.parkNo,row]));
-  const exact=new Map();const unmatched=[];
+  const sourceRows=[];
   for(let n=3;n<=sheet.rowCount;n++){
     const parkNo=text(sheet.getCell(`I${n}`))||text(sheet.getCell(`H${n}`));
     const vin=text(sheet.getCell(`F${n}`));
-    if(!parkNo||!vin)continue;
-    const fleet=active.get(parkNo);
-    if(!fleet){unmatched.push({row:n,parkNo});continue}
-    if(exact.has(parkNo))throw new Error(`${parkNo} парк дугаар серийн файлд давхардсан байна`);
-    exact.set(parkNo,{vin,brand:text(sheet.getCell(`D${n}`)),plateNo:text(sheet.getCell(`G${n}`)),year:text(sheet.getCell(`M${n}`)),sourceSheet:'СЕРИАЛ ДУГААРУУД',sourceRow:n});
+    if(!parkNo&&!vin)continue;
+    sourceRows.push({parkNo,vin,brand:text(sheet.getCell(`D${n}`)),plateNo:text(sheet.getCell(`G${n}`)),year:text(sheet.getCell(`M${n}`)),sourceSheet:'СЕРИАЛ ДУГААРУУД',sourceRow:n,__sheet:'СЕРИАЛ ДУГААРУУД',__excelRow:n});
   }
-  return {records:activeFleet.map(row=>({...row,...(exact.get(row.parkNo)||{}),status:'inactive',availability:'inactive',site:'Ууцар'})),matched:exact.size,unmatched};
+  return matchFleetSerialRows(sourceRows);
 }

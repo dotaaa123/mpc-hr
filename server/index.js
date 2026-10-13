@@ -5,16 +5,18 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { parseAllData } from './allData.js';
+import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
 import { validateProduction, productionSourceKey } from './production.js';
+import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
+import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -69,9 +71,9 @@ function auth(req,res,next) {
   req.user=session; next();
 }
 const admin = (req,res,next) => req.user.role==='admin' ? next() : res.status(403).json({error:'Зөвхөн админ эрхтэй'});
-const defaultPermissions={dispatcher:{assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete']}};
-const permissionPages=[...types,'documents'];
-const permissionsFor=user=>user.role==='admin'?Object.fromEntries(permissionPages.map(page=>[page,['read','create','update','delete']])):{...(defaultPermissions[user.role]||{}),...JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions||'{}')};
+const defaultPermissions={dispatcher:{assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read']},clerk:{maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update']},camp:{attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update']},hr:{employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete']}};
+const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
+const permissionsFor=user=>permissionMatrix(user.role,defaultPermissions[user.role]||{},JSON.parse(db.prepare('SELECT permissions FROM role_permissions WHERE project_id=? AND role=?').get(currentProject(),user.role)?.permissions||'{}'),[...types,'documents']);
 const allowed=(req,page,action)=>Boolean(permissionsFor(req.user)[page]?.includes(action));
 const editor=(req,res,next)=>allowed(req,req.params.type,req.method==='DELETE'?'delete':req.method==='PUT'||req.method==='PATCH'?'update':'create')?next():res.status(403).json({error:'Бүртгэх эрхгүй'});
 function audit(req,page,action,recordId,details={}) {db.prepare('INSERT INTO audit_logs(project_id,user_id,username,role,page,action,record_id,details) VALUES(?,?,?,?,?,?,?,?)').run(currentProject(),req.user.id,req.user.username,req.user.role,page,action,recordId||null,JSON.stringify(details))}
@@ -89,7 +91,7 @@ function validate(type, body) {
   if (type==='productionEntries' && value.operatorId && !get('employees',value.operatorId)) throw new Error('Оператор олдсонгүй');
   if (type==='attendance'&&['day','night'].includes(value.status)&&all('shiftOverrides').some(row=>row.date===value.date&&Number(row.originalEmployeeId)===Number(value.employeeId))) throw new Error('Энэ өдөр өөр ажилтнаар орлуулсан тул ажилласан гэж бүртгэх боломжгүй');
   if (type==='equipment') {value.status ||= 'ready';value.availability ||= value.status==='ready'?'available':'inactive';const crew=['A','B','C','D'].map(group=>[group,value[`operator${group}Id`]]).filter(([,id])=>id);if(new Set(crew.map(([,id])=>Number(id))).size!==crew.length)throw new Error('Нэг операторыг хоёр ээлжид оноож болохгүй');for(const [group,id] of crew){const person=get('employees',id);if(!person||person.shiftGroup!==group)throw new Error(`${group} ээлжийн оператор тухайн бүлгийн ажилтан байх ёстой`)}}
-  if(type==='equipmentTransfers') {if(Number(value.removedEquipmentId)===Number(value.installedEquipmentId))throw new Error('Сэлбэгийг нэг техникээс салгаж мөн тэр техник дээр суурилуулах боломжгүй');if(!get('equipment',value.removedEquipmentId)||!get('equipment',value.installedEquipmentId))throw new Error('Салгасан болон суурилуулсан техникийг сонгоно уу');if(!Number.isInteger(Number(value.quantity))||Number(value.quantity)<=0)throw new Error('Тоо ширхэг 0-ээс их бүхэл тоо байна');if(value.condition&&!['new','used','repaired'].includes(value.condition))throw new Error('Сэлбэгийн төлөв буруу байна');for(const key of ['removedHours','installedHours','installedKm'])if(value[key]!==undefined&&value[key]!==''&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))throw new Error('Мото цаг болон км 0-ээс бага байж болохгүй');if([value.installedHours,value.installedKm].every(entry=>entry===undefined||entry===''))throw new Error('Суурилуулах үеийн мото цаг эсвэл км-ийн нэгийг оруулна уу');if(value.performedBy&&!get('employees',value.performedBy))throw new Error('Ажил гүйцэтгэсэн хүнийг сонгоно уу');for(const key of ['removedDate','installedDate'])if(!/^\d{4}-\d{2}-\d{2}$/.test(value[key])||Number.isNaN(Date.parse(`${value[key]}T00:00:00Z`))||new Date(`${value[key]}T00:00:00Z`).toISOString().slice(0,10)!==value[key])throw new Error('Салгасан болон суурилуулсан огноог YYYY-MM-DD хэлбэрээр оруулна уу');if(value.removedDate>value.installedDate)throw new Error('Суурилуулсан огноо салгасан огнооноос өмнө байж болохгүй')}
+  if(type==='equipmentTransfers') {if(Number(value.removedEquipmentId)===Number(value.installedEquipmentId))throw new Error('Сэлбэгийг нэг техникээс салгаж мөн тэр техник дээр суурилуулах боломжгүй');if(!get('equipment',value.removedEquipmentId)||!get('equipment',value.installedEquipmentId))throw new Error('Салгасан болон суурилуулсан техникийг сонгоно уу');if(!Number.isInteger(Number(value.quantity))||Number(value.quantity)<=0)throw new Error('Тоо ширхэг 0-ээс их бүхэл тоо байна');if(value.condition&&!['new','used','repaired'].includes(value.condition))throw new Error('Сэлбэгийн төлөв буруу байна');for(const key of ['removedHours','installedHours','installedKm'])if(value[key]!==undefined&&value[key]!==''&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))throw new Error('Мото цаг болон км 0-ээс бага байж болохгүй');for(const key of ['removedDate','installedDate'])if(!/^\d{4}-\d{2}-\d{2}$/.test(value[key])||Number.isNaN(Date.parse(`${value[key]}T00:00:00Z`))||new Date(`${value[key]}T00:00:00Z`).toISOString().slice(0,10)!==value[key])throw new Error('Салгасан болон суурилуулсан огноог YYYY-MM-DD хэлбэрээр оруулна уу');if(value.removedDate>value.installedDate)throw new Error('Суурилуулсан огноо салгасан огнооноос өмнө байж болохгүй')}
   if (type === 'equipment' && value.haulCapacity !== undefined && (!Number.isFinite(Number(value.haulCapacity)) || Number(value.haulCapacity) <= 0)) throw new Error('Нэг рейсийн багтаамж 0-ээс их байх ёстой');
   if (type==='plans') buildPlanSchedule(value,all('employees'),all('equipment'),all('attendance'),all('shiftOverrides'));
   if (type==='productionEntries') validateProduction(value);
@@ -273,8 +275,8 @@ app.patch('/api/me/password',auth,(req,res) => {
 });
 app.get('/api/projects',auth,admin,(_req,res)=>res.json(db.prepare('SELECT id,name,active FROM projects ORDER BY id').all()));
 app.post('/api/projects',auth,admin,(req,res)=>{const name=String(req.body?.name||'').trim();if(name.length<2||name.length>100)return res.status(400).json({error:'Төслийн нэр 2–100 тэмдэгт байна'});try{const id=db.prepare('INSERT INTO projects(name) VALUES(?)').run(name).lastInsertRowid;audit(req,'projects','create',id,{name});res.json({id,name,active:1})}catch{res.status(409).json({error:'Ийм нэртэй төсөл байна'})}});
-app.get('/api/permissions',auth,(req,res)=>{if(req.user.role==='admin'){const stored=db.prepare('SELECT role,permissions FROM role_permissions WHERE project_id=?').all(currentProject());return res.json(Object.fromEntries(roles.map(role=>[role,{...(defaultPermissions[role]||{}),...JSON.parse(stored.find(row=>row.role===role)?.permissions||'{}')}])))}res.json({[req.user.role]:permissionsFor(req.user)})});
-app.put('/api/permissions/:role',auth,admin,(req,res)=>{const role=req.params.role,input=req.body?.permissions;if(!roles.includes(role)||role==='admin'||!input||typeof input!=='object'||Array.isArray(input))return res.status(400).json({error:'Эрхийн тохиргоо буруу байна'});const actions=['read','create','update','delete'];const permissions=Object.fromEntries(Object.entries(input).filter(([page])=>permissionPages.includes(page)).map(([page,list])=>[page,Array.isArray(list)?list.filter(action=>actions.includes(action)):[]]));db.prepare('INSERT INTO role_permissions(project_id,role,permissions) VALUES(?,?,?) ON CONFLICT(project_id,role) DO UPDATE SET permissions=excluded.permissions,updated_at=CURRENT_TIMESTAMP').run(currentProject(),role,JSON.stringify(permissions));audit(req,'permissions','update',null,{role,permissions});res.json({role,permissions})});
+app.get('/api/permissions',auth,(req,res)=>{if(req.user.role==='admin'){const stored=db.prepare('SELECT role,permissions FROM role_permissions WHERE project_id=?').all(currentProject());return res.json(Object.fromEntries(roles.map(role=>[role,permissionMatrix(role,defaultPermissions[role]||{},JSON.parse(stored.find(row=>row.role===role)?.permissions||'{}'),[...types,'documents'])])))}res.json({[req.user.role]:permissionsFor(req.user)})});
+app.put('/api/permissions/:role',auth,admin,(req,res)=>{const role=req.params.role,input=req.body?.permissions;if(!roles.includes(role)||!input||typeof input!=='object'||Array.isArray(input))return res.status(400).json({error:'Эрхийн тохиргоо буруу байна'});const actions=['read','create','update','delete'];const permissions=Object.fromEntries(Object.entries(input).filter(([page])=>permissionPages.includes(page)).map(([page,list])=>[page,Array.isArray(list)?list.filter(action=>actions.includes(action)&&((role!=='admin'&&!viewPages.some(view=>view.key===page))||action==='read')):[]]));if(role==='admin')permissions.permissions=['read'];db.prepare('INSERT INTO role_permissions(project_id,role,permissions) VALUES(?,?,?) ON CONFLICT(project_id,role) DO UPDATE SET permissions=excluded.permissions,updated_at=CURRENT_TIMESTAMP').run(currentProject(),role,JSON.stringify(permissions));audit(req,'permissions','update',null,{role,permissions});res.json({role,permissions})});
 app.get('/api/audit',auth,admin,(req,res)=>{const role=String(req.query.role||''),page=String(req.query.page||'');res.json(db.prepare(`SELECT id,username,role,page,action,record_id AS recordId,details,created_at AS createdAt FROM audit_logs WHERE project_id=? AND (?='' OR role=?) AND (?='' OR page=?) ORDER BY id DESC LIMIT 1000`).all(currentProject(),role,role,page,page).map(row=>({...row,details:JSON.parse(row.details)})))});
 app.get('/api/notifications',auth,(req,res)=>{
   const readable=permissionsFor(req.user);
@@ -389,7 +391,7 @@ app.get('/api/bootstrap',auth,(req,res)=>{
   const employees=all('employees');
   const assignments=all('assignments');
   const permissions=permissionsFor(req.user);
-  const records=Object.fromEntries(types.map(type=>[type,permissions[type]?.includes('read')?visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees):[]]));
+  const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees):[]]));
   const users=req.user.role==='admin'?db.prepare('SELECT id,username,name,role,camp_id AS campId,project_id AS projectId,employee_id AS employeeId,active FROM users WHERE project_id=? OR role=? ORDER BY id').all(currentProject(),'admin'):[];
   res.json({records,submissions:submissionsForUser(req.user,assignments,employees),users,permissions,projectId:currentProject()});
 });
@@ -402,6 +404,24 @@ app.get('/api/records/:type',auth,(req,res)=>{
 app.post('/api/records/:type',auth,editor,(req,res) => {
   const type=req.params.type; if (!types.includes(type)) return res.status(404).end();
   try { const value=validate(type,req.body);if(!canEditRecord(req,type,value))return res.status(403).json({error:'Өөр camp-ийн ажилтны бүртгэл хийх эрхгүй'});if(type==='plans'){db.exec('BEGIN');try{const plan=insert(type,value);syncPlanAssignments(plan.id,value);audit(req,type,'create',plan.id,{name:plan.name});db.exec('COMMIT');return res.json(plan)}catch(error){db.exec('ROLLBACK');throw error}}if(type==='shiftOverrides'){db.exec('BEGIN');try{const record=insert(type,value);const changed=applyShiftOverride(record.id,value);audit(req,type,'create',record.id,{changedAssignments:changed});db.exec('COMMIT');return res.json(record)}catch(error){db.exec('ROLLBACK');throw error}}const record=insert(type,value);audit(req,type,'create',record.id,{sourceRow:record.sourceRow||null});res.json(record); } catch(err) { res.status(400).json({error:err.message}); }
+});
+app.post('/api/import/:type/check',auth,editor,(req,res)=>{
+  const {type}=req.params;
+  if(!types.includes(type))return res.status(404).end();
+  const rows=req.body.rows;
+  if(!Array.isArray(rows)||rows.length>(type==='productionEntries'?3000:2000))return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
+  const issues=[];const seen=new Set();const existing=new Set(all(type).map(value=>importBatchKey(type,value)).filter(Boolean));
+  rows.forEach((row,index)=>{
+    try{
+      const value=validate(type,row);
+      if(!canEditRecord(req,type,value))throw new Error('Энэ мөрийг бүртгэх эрхгүй');
+      const key=importBatchKey(type,value);
+      if(key&&existing.has(key))throw new Error('Энэ бүртгэл өмнө оруулсан байна');
+      if(key&&seen.has(key))throw new Error('Файл дотор давхардсан бүртгэл байна');
+      if(key)seen.add(key);
+    }catch(error){issues.push({index,row:Number(row.__excelRow)||index+2,sheet:row.__sheet||'',message:error.message})}
+  });
+  res.json({issues});
 });
 app.post('/api/import/:type',auth,editor,(req,res)=>{
   const type=req.params.type;
@@ -489,12 +509,31 @@ app.post('/api/equipment-source/import',auth,admin,(req,res)=>{
     db.exec('COMMIT');res.json({added,updated,unchanged,batchId});
   }catch(error){db.exec('ROLLBACK');res.status(400).json({error:error.message})}
 });
+app.post('/api/equipment-all-data/preview',auth,admin,async(req,res)=>{
+  try{
+    const file=Buffer.from(String(req.body.fileBase64||''),'base64');
+    if(!file.length||file.length>8_000_000)throw new Error('Excel файл 8 MB хүртэл хэмжээтэй байна');
+    const {records,totalRows}=await parseAllData(file);
+    if(!records.length)throw new Error('Техникийн мөр олдсонгүй');
+    const issues=await checkAllDataRows(records,row=>validate('equipment',row));
+    res.json({rows:records.map(({sourceData,...row})=>({...row,__sheet:'ALL DATA',__excelRow:row.sourceRow})),issues,totalRows});
+  }catch(error){res.status(400).json({error:error.message})}
+});
+app.post('/api/equipment-all-data/check',auth,admin,async(req,res)=>{
+  const rows=req.body.rows;
+  if(!Array.isArray(rows)||rows.length>3000)return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
+  res.json({issues:await checkAllDataRows(rows,row=>validate('equipment',row))});
+});
 app.post('/api/equipment-all-data/import',auth,admin,async(req,res) => {
   try {
     const file=Buffer.from(String(req.body.fileBase64 || ''),'base64');
     if (!file.length || file.length>8_000_000) throw new Error('Excel файл 8 MB хүртэл хэмжээтэй байна');
-    const {records,totalRows}=await parseAllData(file);
+    const parsed=await parseAllData(file);
+    const records=applyAllDataEdits(parsed.records,req.body.overrides,req.body.excludedRows);
+    const {totalRows}=parsed;
     if (!records.length) throw new Error('VIN-тэй техникийн мөр олдсонгүй');
+    const issues=await checkAllDataRows(records,row=>validate('equipment',row));
+    if(issues.length)throw new Error(`${issues[0].row}-р мөр: ${issues[0].message}`);
     let added=0,updated=0;
     let batchId;
     db.exec('BEGIN');

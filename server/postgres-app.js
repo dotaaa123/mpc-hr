@@ -2,14 +2,16 @@ import express from 'express';
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
-import { parseAllData } from './allData.js';
+import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
 import { validateProduction, productionSourceKey } from './production.js';
+import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
+import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -72,16 +74,16 @@ async function auth(req, res, next) {
 }
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
 const defaultPermissions = {
-  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
-  clerk: { maintenance:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
+  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
+  clerk: { maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
   camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
-  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
+  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
 };
-const permissionPages=[...types,'documents'];
+const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
 async function allowed(req, page, action) {
-  if (req.user.role === 'admin') return true;
+  if (req.user.role === 'admin' && action !== 'read') return true;
   const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role]);
-  const permissions = { ...(defaultPermissions[req.user.role] || {}), ...(rows[0]?.permissions || {}) };
+  const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},rows[0]?.permissions||{},[...types,'documents']);
   return Array.isArray(permissions[page]) && permissions[page].includes(action);
 }
 const editor = async (req, res, next) => {
@@ -121,8 +123,7 @@ async function validate(type, body, db) {
     if (!Number.isInteger(Number(value.quantity)) || Number(value.quantity) <= 0) throw new Error('Тоо ширхэг 0-ээс их бүхэл тоо байна');
     if (value.condition && !['new','used','repaired'].includes(value.condition)) throw new Error('Сэлбэгийн төлөв буруу байна');
     for (const key of ['removedHours','installedHours','installedKm']) if (value[key] !== undefined && value[key] !== '' && (!Number.isFinite(Number(value[key])) || Number(value[key]) < 0)) throw new Error('Мото цаг болон км 0-ээс бага байж болохгүй');
-    if ([value.installedHours,value.installedKm].every(entry=>entry === undefined || entry === '')) throw new Error('Суурилуулах үеийн мото цаг эсвэл км-ийн нэгийг оруулна уу');
-    if (value.performedBy && !await get('employees', value.performedBy, db)) throw new Error('Ажил гүйцэтгэсэн хүнийг сонгоно уу');
+
     for (const key of ['removedDate','installedDate']) if (!/^\d{4}-\d{2}-\d{2}$/.test(value[key]) || Number.isNaN(Date.parse(`${value[key]}T00:00:00Z`)) || new Date(`${value[key]}T00:00:00Z`).toISOString().slice(0,10) !== value[key]) throw new Error('Салгасан болон суурилуулсан огноог YYYY-MM-DD хэлбэрээр оруулна уу');
     if (value.removedDate > value.installedDate) throw new Error('Суурилуулсан огноо салгасан огнооноос өмнө байж болохгүй');
   }
@@ -357,17 +358,18 @@ app.post('/api/projects', auth, admin, async (req, res) => {
 app.get('/api/permissions', auth, async (req, res) => {
   if (req.user.role === 'admin') {
     const rows = (await query('SELECT role,permissions FROM public.role_permissions WHERE project_id=$1', [currentProject()])).rows;
-    return res.json(Object.fromEntries(roles.map(role => [role, { ...(defaultPermissions[role] || {}), ...(rows.find(row => row.role === role)?.permissions || {}) }])));
+    return res.json(Object.fromEntries(roles.map(role => [role, permissionMatrix(role,defaultPermissions[role]||{},rows.find(row => row.role === role)?.permissions||{},[...types,'documents'])])));
   }
-  res.json({ [req.user.role]: { ...(defaultPermissions[req.user.role] || {}), ...((await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions || {}) } });
+  res.json({ [req.user.role]: permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},(await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions||{},[...types,'documents']) });
 });
 app.put('/api/permissions/:role', auth, admin, async (req, res) => {
   const role = req.params.role;
-  if (!roles.includes(role) || role === 'admin') return res.status(400).json({ error: 'Эрх буруу байна' });
+  if (!roles.includes(role)) return res.status(400).json({ error: 'Эрх буруу байна' });
   const input = req.body?.permissions;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return res.status(400).json({ error: 'Эрхийн тохиргоо буруу байна' });
   const actions = ['read','create','update','delete'];
-  const permissions = Object.fromEntries(Object.entries(input).filter(([page]) => permissionPages.includes(page)).map(([page, list]) => [page, Array.isArray(list) ? list.filter(action => actions.includes(action)) : []]));
+  const permissions = Object.fromEntries(Object.entries(input).filter(([page]) => permissionPages.includes(page)).map(([page, list]) => [page, Array.isArray(list) ? list.filter(action => actions.includes(action) && ((role !== 'admin' && !viewPages.some(view=>view.key===page)) || action === 'read')) : []]));
+  if(role==='admin')permissions.permissions=['read'];
   await query('INSERT INTO public.role_permissions(project_id,role,permissions) VALUES($1,$2,$3::jsonb) ON CONFLICT(project_id,role) DO UPDATE SET permissions=$3::jsonb,updated_at=now()', [currentProject(), role, JSON.stringify(permissions)]);
   await audit(req, 'permissions', 'update', null, { role, permissions });
   res.json({ role, permissions });
@@ -527,8 +529,8 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   for(const row of recordResult.rows)grouped[row.type].push(rowRecord(row));
   const employees=grouped.employees,assignments=grouped.assignments;
   const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
-  const permissions = req.user.role==='admin' ? Object.fromEntries([...types,'documents'].map(type=>[type,['read','create','update','delete']])) : { ...(defaultPermissions[req.user.role] || {}), ...(permissionRows[0]?.permissions || {}) };
-  const records=Object.fromEntries(types.map(type=>[type,permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
+  const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},permissionRows[0]?.permissions||{},[...types,'documents']);
+  const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
   res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,projectId:currentProject()});
 });
 app.get('/api/records/:type',auth,async(req,res)=>{
@@ -619,6 +621,24 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
   } catch (error) { bad(res, error); }
 });
 
+app.post('/api/import/:type/check', auth, editor, async (req, res) => {
+  const {type}=req.params;
+  if(!types.includes(type))return res.status(404).end();
+  const rows=req.body.rows;
+  if(!Array.isArray(rows)||rows.length>(type==='productionEntries'?3000:2000))return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
+  const issues=[];const seen=new Set();const existing=new Set((await all(type)).map(value=>importBatchKey(type,value)).filter(Boolean));
+  for(const [index,row] of rows.entries()){
+    try{
+      const value=await validate(type,row);
+      if(!await canEditRecord(req,type,value))throw new Error('Энэ мөрийг бүртгэх эрхгүй');
+      const key=importBatchKey(type,value);
+      if(key&&existing.has(key))throw new Error('Энэ бүртгэл өмнө оруулсан байна');
+      if(key&&seen.has(key))throw new Error('Файл дотор давхардсан бүртгэл байна');
+      if(key)seen.add(key);
+    }catch(error){issues.push({index,row:Number(row.__excelRow)||index+2,sheet:row.__sheet||'',message:error.message})}
+  }
+  res.json({issues});
+});
 app.post('/api/import/:type', auth, editor, async (req, res) => {
   const type = req.params.type;
   if (!types.includes(type)) return res.status(404).end();
@@ -724,12 +744,31 @@ app.post('/api/equipment-source/import', auth, admin, async (req, res) => {
     res.json({added,updated,unchanged,batchId});
   }catch(error){bad(res,error)}
 });
+app.post('/api/equipment-all-data/preview',auth,admin,async(req,res)=>{
+  try{
+    const file=Buffer.from(String(req.body.fileBase64||''),'base64');
+    if(!file.length||file.length>8_000_000)throw new Error('Excel файл 8 MB хүртэл хэмжээтэй байна');
+    const {records,totalRows}=await parseAllData(file);
+    if(!records.length)throw new Error('Техникийн мөр олдсонгүй');
+    const issues=await checkAllDataRows(records,row=>validate('equipment',row));
+    res.json({rows:records.map(({sourceData,...row})=>({...row,__sheet:'ALL DATA',__excelRow:row.sourceRow})),issues,totalRows});
+  }catch(error){bad(res,error)}
+});
+app.post('/api/equipment-all-data/check',auth,admin,async(req,res)=>{
+  const rows=req.body.rows;
+  if(!Array.isArray(rows)||rows.length>3000)return res.status(400).json({error:'Импортын мөрийн тоо хэтэрлээ'});
+  res.json({issues:await checkAllDataRows(rows,row=>validate('equipment',row))});
+});
 app.post('/api/equipment-all-data/import', auth, admin, async (req, res) => {
   try {
     const file = Buffer.from(String(req.body.fileBase64 || ''), 'base64');
     if (!file.length || file.length > 8_000_000) throw new Error('Excel файл 8 MB хүртэл хэмжээтэй байна');
-    const { records, totalRows } = await parseAllData(file);
+    const parsed=await parseAllData(file);
+    const records=applyAllDataEdits(parsed.records,req.body.overrides,req.body.excludedRows);
+    const {totalRows}=parsed;
     if (!records.length) throw new Error('VIN-тэй техникийн мөр олдсонгүй');
+    const issues=await checkAllDataRows(records,row=>validate('equipment',row));
+    if(issues.length)throw new Error(`${issues[0].row}-р мөр: ${issues[0].message}`);
     let added = 0, updated = 0;
     let batchId;
     await withTransaction(async db => {

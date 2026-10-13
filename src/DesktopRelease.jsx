@@ -4,9 +4,9 @@ import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
 
 const CHUNK = 1024 * 1024;
 const PUBLIC_RELEASE = {
-  filename: 'MPC-HR-1.0.4-Windows.zip',
-  version: '1.0.4',
-  url: 'https://github.com/dotaaa123/mpc-hr/releases/download/v1.0.4/MPC-HR-1.0.4-Windows.zip',
+  filename: 'MPC-HR-1.0.5-Windows.zip',
+  version: '1.0.5',
+  url: 'https://github.com/dotaaa123/mpc-hr/releases/download/v1.0.5/MPC-HR-1.0.5-Windows.zip',
 };
 const releaseRequest = async (path, options={}) => {
   const projectId=sessionStorage.getItem('mpc-project-id');
@@ -55,7 +55,7 @@ export function DesktopDownload({compact=false}) {
 }
 
 export function DesktopReleasePage() {
-  const [release,setRelease]=useState(PUBLIC_RELEASE),[file,setFile]=useState(null),[version,setVersion]=useState('1.0.4'),[progress,setProgress]=useState(0),[busy,setBusy]=useState(false),[uploadError,setUploadError]=useState('');
+  const [release,setRelease]=useState(PUBLIC_RELEASE),[file,setFile]=useState(null),[version,setVersion]=useState('1.0.5'),[progress,setProgress]=useState(0),[busy,setBusy]=useState(false),[uploadError,setUploadError]=useState('');
   const refresh=()=>releaseRequest('/latest').then(value=>setRelease(value||PUBLIC_RELEASE)).catch(()=>setRelease(PUBLIC_RELEASE));
   useEffect(()=>{refresh()},[]);
   const upload=async()=>{
@@ -80,6 +80,6 @@ export function DesktopReleasePage() {
   };
   return <div className="page-stack"><div className="page-title-row"><div><span className="eyebrow">ТОХИРГОО</span><Typography.Title level={2}>Windows програм</Typography.Title><Typography.Text type="secondary">Админ ZIP хувилбарыг оруулсны дараа нэвтрэх хуудсанд татах товч гарна.</Typography.Text></div></div>
     <Card title="Нийтлэгдсэн хувилбар">{release?<Space direction="vertical"><Typography.Text strong>{release.filename} · {release.version}</Typography.Text><Typography.Text type="secondary">{release.url?'GitHub Releases-ээс шууд татна':`${(release.size/1024/1024).toFixed(1)} MB · ${new Date(release.createdAt).toLocaleString('mn-MN')}`}</Typography.Text><DesktopDownload/></Space>:<Alert type="info" showIcon message="Хувилбар хараахан нийтлээгүй байна"/>}</Card>
-    <Card title="Шинэ хувилбар оруулах"><Space direction="vertical" style={{width:'100%'}} size="middle"><Alert type="info" showIcon message="1.0.4 суулгагч GitHub Releases-д нийтлэгдсэн. Хэрэглэгчид нэвтрэх хуудаснаас шууд татаж болно; ZIP-ийг дахин оруулах шаардлагагүй."/><Alert type="warning" showIcon message="Серверт ZIP хадгалах нэмэлт арга" description="Энэ арга алдаа өгвөл дээрх нийтлэгдсэн хувилбарын таталт хэвийн ажиллана."/><Input placeholder="Хувилбар, жишээ нь 1.0.4" value={version} onChange={event=>setVersion(event.target.value)} style={{maxWidth:240}}/><input aria-label="Windows програмын ZIP" type="file" accept=".zip,application/zip" onChange={event=>setFile(event.target.files?.[0]||null)}/><Button type="primary" icon={<UploadOutlined/>} loading={busy} disabled={!file} onClick={upload}>ZIP серверт оруулах</Button>{uploadError&&<Alert type="error" showIcon message="ZIP хадгалж чадсангүй" description={uploadError}/>} {busy&&<Progress percent={progress}/>}</Space></Card>
+    <Card title="Шинэ хувилбар оруулах"><Space direction="vertical" style={{width:'100%'}} size="middle"><Alert type="info" showIcon message="1.0.5 суулгагч GitHub Releases-д нийтлэгдсэн. Хэрэглэгчид нэвтрэх хуудаснаас шууд татаж болно; ZIP-ийг дахин оруулах шаардлагагүй."/><Alert type="warning" showIcon message="Серверт ZIP хадгалах нэмэлт арга" description="Энэ арга алдаа өгвөл дээрх нийтлэгдсэн хувилбарын таталт хэвийн ажиллана."/><Input placeholder="Хувилбар, жишээ нь 1.0.5" value={version} onChange={event=>setVersion(event.target.value)} style={{maxWidth:240}}/><input aria-label="Windows програмын ZIP" type="file" accept=".zip,application/zip" onChange={event=>setFile(event.target.files?.[0]||null)}/><Button type="primary" icon={<UploadOutlined/>} loading={busy} disabled={!file} onClick={upload}>ZIP серверт оруулах</Button>{uploadError&&<Alert type="error" showIcon message="ZIP хадгалж чадсангүй" description={uploadError}/>} {busy&&<Progress percent={progress}/>}</Space></Card>
   </div>;
 }

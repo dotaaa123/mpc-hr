@@ -31,23 +31,24 @@ export async function parseOtrEquipment(file) {
     if (description) current = description;
     const parkNo = value(row.getCell(7)).replace(/\s+/g, ' ').toUpperCase();
     const vin = value(row.getCell(3)).toUpperCase();
+    const kind = /экскаватор/i.test(current||'') ? 'Экскаватор' : /өөрөө буулгагч/i.test(current||'') ? 'Дамп' : /автогрейдер/i.test(current||'') ? 'Автогрейдер' : /бульдозер/i.test(current||'') ? 'Бульдозер' : 'Техник';
+    const year = value(row.getCell(4)).match(/20\d{2}/)?.[0] || '';
+    const remark = value(row.getCell(5));
+    const record={ parkNo, kind, model: current||'', vin, plateNo: value(row.getCell(6)), year,
+      site: 'Чанд-Үйлс', status: 'inactive', availability: 'inactive',
+      sourceStatus: 'OTR 2026-04-03 · баталгаажаагүй', sourceSheet: sheet.name, sourceRow: n,__sheet:sheet.name,__excelRow:n,
+      notes: [remark, value(row.getCell(8)), '2026-04-03-ны жагсаалт; өнөөдрийн ажлын бэлэн байдал болон мото цагийг тусад нь батална.'].filter(Boolean).join(' · ') };
+    rows.push(record);
     if (!parkNo || !current || (!vin && !description)) {
-      issues.push(`${n}-р мөр: парк, төрөл эсвэл арлын дугаар дутуу; импортлохгүй`);
+      issues.push({row:n,sheet:sheet.name,message:'парк, төрөл эсвэл арлын дугаар дутуу'});
       continue;
     }
     if (parks.has(parkNo) || vin && vins.has(vin)) {
-      issues.push(`${n}-р мөр: давхардсан парк эсвэл арлын дугаар; импортлохгүй`);
+      issues.push({row:n,sheet:sheet.name,message:'давхардсан парк эсвэл арлын дугаар'});
       continue;
     }
     parks.add(parkNo);
     if (vin) vins.add(vin);
-    const kind = /экскаватор/i.test(current) ? 'Экскаватор' : /өөрөө буулгагч/i.test(current) ? 'Дамп' : /автогрейдер/i.test(current) ? 'Автогрейдер' : /бульдозер/i.test(current) ? 'Бульдозер' : 'Техник';
-    const year = value(row.getCell(4)).match(/20\d{2}/)?.[0] || '';
-    const remark = value(row.getCell(5));
-    rows.push({ parkNo, kind, model: current, vin, plateNo: value(row.getCell(6)), year,
-      site: 'Чанд-Үйлс', status: 'inactive', availability: 'inactive',
-      sourceStatus: 'OTR 2026-04-03 · баталгаажаагүй', sourceSheet: sheet.name, sourceRow: n,
-      notes: [remark, value(row.getCell(8)), '2026-04-03-ны жагсаалт; өнөөдрийн ажлын бэлэн байдал болон мото цагийг тусад нь батална.'].filter(Boolean).join(' · ') });
   }
   return { rows, issues };
 }
@@ -65,13 +66,12 @@ export async function parseSoldEquipment(file) {
     const count = Number(value(row.getCell(3)));
     if (!model && !value(row.getCell(3))) continue;
     if (!model || !Number.isInteger(count) || count < 1) {
-      issues.push(`${n}-р мөр: загвар эсвэл тоо ширхэг буруу`);
-      continue;
+      issues.push({row:n,sheet:sheet.name,message:'загвар эсвэл тоо ширхэг буруу'});
     }
-    rows.push({ sourceRow: n, model, count, buyer: value(row.getCell(4)), location: value(row.getCell(5)),
+    rows.push({ sourceRow: n,__sheet:sheet.name,__excelRow:n, model, count:Number.isFinite(count)?count:'', buyer: value(row.getCell(4)), location: value(row.getCell(5)),
       motorHours: value(row.getCell(6)), note: value(row.getCell(7)) });
   }
-  return { rows, issues, total: rows.reduce((sum, row) => sum + row.count, 0) };
+  return { rows, issues, total: rows.reduce((sum, row) => sum + (Number(row.count)||0), 0) };
 }
 
 export async function parseChandFleet(file) {
@@ -86,11 +86,11 @@ export async function parseChandFleet(file) {
     const vin=normalizeVin(rawVin);
     const model=value(row.getCell(5))||value(row.getCell(4));
     const rawKind=value(row.getCell(3));
-    if(!parkNo||!vin||!model||!rawKind){issues.push(`${n}-р мөр: парк, VIN, төрөл эсвэл загвар дутуу`);continue}
-    if(parks.has(parkNo)||vins.has(vin)){issues.push(`${n}-р мөр: давхардсан парк/VIN (${parkNo})`);continue}
-    parks.add(parkNo);vins.add(vin);
     const tank=Number(value(row.getCell(14)).replaceAll(',',''));
-    rows.push({parkNo,kind:typeOf(rawKind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(9)),year:yearOf(value(row.getCell(21))),site:'Чанд-Үйлс',status:'inactive',availability:'inactive',...(tank>0?{tankCapacityLiters:tank}:{}),sourceStatus:'Чанд-Үйлс 2026 · бэлэн байдал баталгаажаагүй',sourceSheet:'2026',sourceRow:n,notes:rawVin!==vin?`Эх файлын VIN: ${rawVin}`:''});
+    rows.push({parkNo,kind:typeOf(rawKind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(9)),year:yearOf(value(row.getCell(21))),site:'Чанд-Үйлс',status:'inactive',availability:'inactive',...(tank>0?{tankCapacityLiters:tank}:{}),sourceStatus:'Чанд-Үйлс 2026 · бэлэн байдал баталгаажаагүй',sourceSheet:'2026',sourceRow:n,__sheet:'2026',__excelRow:n,notes:rawVin!==vin?`Эх файлын VIN: ${rawVin}`:''});
+    if(!parkNo||!vin||!model||!rawKind){issues.push({row:n,sheet:'2026',message:'парк, VIN, төрөл эсвэл загвар дутуу'});continue}
+    if(parks.has(parkNo)||vins.has(vin)){issues.push({row:n,sheet:'2026',message:`давхардсан парк/VIN (${parkNo})`});continue}
+    parks.add(parkNo);vins.add(vin);
   }
   return {rows,issues};
 }
@@ -104,11 +104,11 @@ export async function parseUutsarFleet(file) {
     const kind=value(row.getCell(5));const model=value(row.getCell(10));
     if(!kind||!model)continue;
     const parkNo=value(row.getCell(9)).toUpperCase();const vin=normalizeVin(value(row.getCell(6)));
-    if(!parkNo){issues.push(`${n}-р мөр: парк дугаар байхгүй (${model})`);continue}
-    if(parks.has(parkNo)||vin&&vins.has(vin)){issues.push(`${n}-р мөр: давхардсан парк/VIN (${parkNo})`);continue}
-    parks.add(parkNo);if(vin)vins.add(vin);
     const moto=value(row.getCell(12));
-    rows.push({parkNo,kind:typeOf(kind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(7)),year:yearOf(value(row.getCell(13))),site:'Ууцар',status:'inactive',availability:'inactive',sourceStatus:'Ууцар серийн жагсаалт · бэлэн байдал баталгаажаагүй',sourceSheet:sheet.name,sourceRow:n,notes:[value(row.getCell(8))&&`Хуучин парк: ${value(row.getCell(8))}`,moto&&`Эх файлын мото цаг: ${moto}`].filter(Boolean).join(' · ')});
+    rows.push({parkNo,kind:typeOf(kind),brand:value(row.getCell(4)),model,vin,plateNo:value(row.getCell(7)),year:yearOf(value(row.getCell(13))),site:'Ууцар',status:'inactive',availability:'inactive',sourceStatus:'Ууцар серийн жагсаалт · бэлэн байдал баталгаажаагүй',sourceSheet:sheet.name,sourceRow:n,__sheet:sheet.name,__excelRow:n,notes:[value(row.getCell(8))&&`Хуучин парк: ${value(row.getCell(8))}`,moto&&`Эх файлын мото цаг: ${moto}`].filter(Boolean).join(' · ')});
+    if(!parkNo){issues.push({row:n,sheet:sheet.name,message:`парк дугаар байхгүй (${model})`});continue}
+    if(parks.has(parkNo)||vin&&vins.has(vin)){issues.push({row:n,sheet:sheet.name,message:`давхардсан парк/VIN (${parkNo})`});continue}
+    parks.add(parkNo);if(vin)vins.add(vin);
   }
   return {rows,issues};
 }

@@ -2,7 +2,7 @@ import { normalizeParkNo } from '../shared/parkNo.js';
 
 const value = cell => {
   const raw = cell?.value;
-  return raw && typeof raw === 'object' && 'formula' in raw ? raw.result : raw;
+  return raw && typeof raw === 'object' && 'result' in raw ? raw.result : raw;
 };
 const string = cell => String(value(cell) ?? '').trim();
 const number = cell => { const raw=value(cell);return raw===null||raw===undefined||raw===''?Number.NaN:Number(raw) };
@@ -35,35 +35,43 @@ export async function parseProductionWorkbook(file) {
   for (let n=6;n<=actual.rowCount;n++) {
     const row=actual.getRow(n);
     const day=date(row.getCell(2));
-    if (!day) continue;
-    const shift={Day:'day',Night:'night'}[string(row.getCell(8))];
+    const shift=string(row.getCell(8)).toLowerCase();
     const haul=normalizeParkNo(string(row.getCell(9)));
     const excavator=normalizeParkNo(string(row.getCell(10)));
     const material=string(row.getCell(14));
     const race=number(row.getCell(16));
     const capacity=capacities.get(haul);
     const cached=number(row.getCell(18));
-    if (!haul && !excavator && !Number.isFinite(race)) continue;
-    if (!shift || !haul || !excavator || !material || !Number.isInteger(race) || race<1 || !capacity || !Number.isFinite(cached) || Math.abs(cached-race*capacity)>0.01) {
-      issues.push(`Actual!${n}: ээлж, техник, материал, рейс, багтаамж эсвэл тооцоолсон м³ зөрсөн`);
-      continue;
-    }
-    rows.push({date:day,startDate:day,endDate:day,kind:'actual',shift,haulParkNo:haul,excavatorParkNo:excavator,pit:string(row.getCell(11)),block:string(row.getCell(12)),level:string(row.getCell(13)),material,materialType:string(row.getCell(15))||material,race,capacity,amount:cached,dump:string(row.getCell(17)),sourceFile:filename,sourceSheet:'Actual',sourceRow:n});
+    if (!day && !haul && !excavator && !Number.isFinite(race) && !material) continue;
+    const problems=[];
+    if(!day)problems.push('огноо буруу');
+    if(!['day','night'].includes(shift))problems.push('өдөр/шөнийн ээлж буруу');
+    if(!haul||!excavator)problems.push('техникийн парк дутуу');
+    if(!material)problems.push('материал дутуу');
+    if(!Number.isInteger(race)||race<1)problems.push('рейс буруу');
+    if(!capacity)problems.push('багтаамж дутуу');
+    if(!Number.isFinite(cached)||Number.isFinite(race)&&capacity&&Math.abs(cached-race*capacity)>0.01)problems.push('бүтээл м³ рейс × багтаамжтай таарахгүй');
+    if(problems.length)issues.push({row:n,sheet:'Actual',message:problems.join('; ')});
+    rows.push({date:day,kind:'actual',shift,haulParkNo:haul,excavatorParkNo:excavator,pit:string(row.getCell(11)),block:string(row.getCell(12)),level:string(row.getCell(13)),material,materialType:string(row.getCell(15))||material,race:Number.isFinite(race)?race:'',capacity:capacity||'',amount:Number.isFinite(cached)?cached:'',dump:string(row.getCell(17)),sourceFile:filename,sourceSheet:'Actual',sourceRow:n,__sheet:'Actual',__excelRow:n});
   }
   const planRows=[];
   for (let n=3;n<=plan.rowCount;n++) {
     const row=plan.getRow(n);
     const day=date(row.getCell(2));
-    if (!day) continue;
     const material=string(row.getCell(12))||string(row.getCell(13));
     const amount=number(row.getCell(15));
-    if (!material || !Number.isFinite(amount) || amount<=0) continue;
     const excavatorParkNo=normalizeParkNo(string(row.getCell(8)));
-    if (!excavatorParkNo) {issues.push(`Plan!${n}: ачигчийн парк дугааргүй`);continue}
-    planRows.push({date:day,startDate:day,endDate:day,kind:'plan',excavatorParkNo,pit:string(row.getCell(9)),block:string(row.getCell(10)),level:string(row.getCell(11)),material,materialType:string(row.getCell(13))||material,amount,dump:string(row.getCell(14)),sourceFile:filename,sourceSheet:'Plan',sourceRow:n});
+    if(!day&&!material&&!excavatorParkNo&&!Number.isFinite(amount))continue;
+    const problems=[];
+    if(!day)problems.push('огноо буруу');
+    if(!material)problems.push('материал дутуу');
+    if(!Number.isFinite(amount)||amount<=0)problems.push('бүтээл м³ буруу');
+    if(!excavatorParkNo)problems.push('ачигчийн парк дугааргүй');
+    if(problems.length)issues.push({row:n,sheet:'Plan',message:problems.join('; ')});
+    planRows.push({date:day,kind:'plan',excavatorParkNo,pit:string(row.getCell(9)),block:string(row.getCell(10)),level:string(row.getCell(11)),material,materialType:string(row.getCell(13))||material,amount:Number.isFinite(amount)?amount:'',dump:string(row.getCell(14)),sourceFile:filename,sourceSheet:'Plan',sourceRow:n,__sheet:'Plan',__excelRow:n});
   }
   if (!rows.length) throw new Error('Actual хуудаснаас импортлох бодит рейс олдсонгүй');
-  const dates=rows.map(row=>row.date).sort();
-  const planDates=planRows.map(row=>row.date).sort();
-  return {actualRows:rows,planRows,issues,actualRange:[dates[0],dates.at(-1)],planRange:planDates.length?[planDates[0],planDates.at(-1)]:null,actualAmount:rows.reduce((sum,row)=>sum+row.amount,0),planAmount:planRows.reduce((sum,row)=>sum+row.amount,0)};
+  const dates=rows.map(row=>row.date).filter(Boolean).sort();
+  const planDates=planRows.map(row=>row.date).filter(Boolean).sort();
+  return {actualRows:rows,planRows,issues,actualRange:dates.length?[dates[0],dates.at(-1)]:[],planRange:planDates.length?[planDates[0],planDates.at(-1)]:null,actualAmount:rows.reduce((sum,row)=>sum+(Number(row.amount)||0),0),planAmount:planRows.reduce((sum,row)=>sum+(Number(row.amount)||0),0)};
 }

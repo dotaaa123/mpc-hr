@@ -23,7 +23,7 @@ Run on Windows after installing Flutter 3.47+, Visual Studio 2022 Desktop develo
 ```powershell
 # Optional server override:
 # $env:MPC_HR_URL = "https://your-project.vercel.app"
-./build_windows.ps1 -Version "1.0.0"
+./build_windows.ps1 -Version "1.0.5"
 ```
 
-The ZIP at `build/installer/MPC-HR-1.0.0-Windows.zip` contains `MPC-HR-Setup.exe`. Upload that ZIP in the web app's admin **Windows program** page. The installer adds Desktop and Start menu shortcuts. A Windows `.exe` build must be produced on Windows.
+The ZIP at `build/installer/MPC-HR-1.0.5-Windows.zip` contains `MPC-HR-Setup.exe`. Upload that ZIP in the web app's admin **Windows program** page. The installer adds Desktop and Start menu shortcuts. A Windows `.exe` build must be produced on Windows.
