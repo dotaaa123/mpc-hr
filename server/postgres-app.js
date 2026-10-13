@@ -932,7 +932,10 @@ app.post('/api/submissions/batch', auth, async (req, res) => {
 
 app.use((error, _req, res, _next) => {
   console.error('MPC HR API error:', error);
-  if (!res.headersSent) res.status(500).json({ error: 'Серверийн алдаа. Supabase холболт болон тохиргоог шалгана уу.' });
+  if (!res.headersSent) res.status(error.status === 413 ? 413 : 500).json({
+    error: error.status === 413 ? 'Хүсэлтийн хэмжээ хэтэрлээ' : 'Серверийн алдаа. Supabase холболт болон тохиргоог шалгана уу.',
+    code: error.code || error.type || error.name || 'unknown',
+  });
 });
 
 export default app;
