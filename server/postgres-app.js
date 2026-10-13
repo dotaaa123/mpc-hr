@@ -15,6 +15,8 @@ import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
+import { defaultPositions, positionKey } from '../shared/positions.js';
+import { builtinRoleNames, roleNameKey } from '../shared/roles.js';
 import { ensureSchema, getPool, withTransaction } from './pgdb.js';
 
 const app = express();
@@ -31,6 +33,26 @@ const get = async (type, id, db) => {
   const { rows } = await query('SELECT id,body,created_at,updated_at FROM public.records WHERE type=$1 AND id=$2 AND project_id=$3', [type, Number(id) || 0, currentProject()], db);
   return rows[0] && rowRecord(rows[0]);
 };
+async function ensurePositions() {
+  await withTransaction(async db=>{
+    const project=currentProject();
+    const seeded=(await query('SELECT positions_seeded FROM public.projects WHERE id=$1 FOR UPDATE',[project],db)).rows[0]?.positions_seeded;
+    const existing=new Set((await all('positions',db)).map(row=>positionKey(row.name)));
+    const names=[...(seeded?[]:defaultPositions),...(await all('employees',db)).map(row=>row.position).filter(Boolean)];
+    for(const name of names){const key=positionKey(name);if(!key||existing.has(key))continue;await query('INSERT INTO public.records(type,body,project_id) VALUES($1,$2::jsonb,$3)',['positions',JSON.stringify({name:String(name).trim()}),project],db);existing.add(key)}
+    if(!seeded)await query('UPDATE public.projects SET positions_seeded=true WHERE id=$1',[project],db);
+  });
+}
+async function ensureRoles() {
+  await withTransaction(async db=>{
+    const project=currentProject();
+    const seeded=(await query('SELECT roles_seeded FROM public.projects WHERE id=$1 FOR UPDATE',[project],db)).rows[0]?.roles_seeded;
+    if(seeded)return;
+    for(const [key,name] of Object.entries(builtinRoleNames))await query('INSERT INTO public.role_definitions(project_id,key,name,builtin) VALUES($1,$2,$3,true) ON CONFLICT(project_id,key) DO NOTHING',[project,key,name],db);
+    await query('UPDATE public.projects SET roles_seeded=true WHERE id=$1',[project],db);
+  });
+}
+const projectRoles=async(db)=> (await query('SELECT key,name,builtin FROM public.role_definitions WHERE project_id=$1 ORDER BY builtin DESC,key',[currentProject()],db)).rows;
 const hash = password => { const salt = randomBytes(16).toString('hex'); return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`; };
 const validPassword = value => typeof value === 'string' && value.length >= 8 && /\p{Lu}/u.test(value) && /\p{Ll}/u.test(value) && /\d/u.test(value) && /[^\p{L}\p{N}]/u.test(value);
 const verify = (password, stored) => {
@@ -74,10 +96,10 @@ async function auth(req, res, next) {
 }
 const admin = (req, res, next) => req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Зөвхөн админ эрхтэй' });
 const defaultPermissions = {
-  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
-  clerk: { maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],assignments:['read','update'] },
-  camp: { attendance:['read','create','update'],employees:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
-  hr: { employees:['read','create','update'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
+  dispatcher: { assignments:['read','update'],productionEntries:['read','create','update'],attendance:['read','create','update'],machineLogs:['read','create','update'],maintenance:['read'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read'],positions:['read'],camps:['read'],campStays:['read'],guests:['read'],mealMenus:['read'],mealFeedback:['read'],bedAssignments:['read'] },
+  clerk: { maintenance:['read','create','update'],equipmentTransfers:['read','create','update'],equipment:['read'],employees:['read','update'],positions:['read'],assignments:['read','update'] },
+  camp: { attendance:['read','create','update'],employees:['read'],positions:['read'],camps:['read'],assignments:['read','update'],campStays:['read','create','update'],guests:['read','create','update'],mealMenus:['read','create','update'],mealFeedback:['read','create','update'],bedAssignments:['read','create','update'] },
+  hr: { employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
 };
 const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
 async function allowed(req, page, action) {
@@ -109,6 +131,7 @@ async function validate(type, body, db) {
   const value = clean(type, body);
   const missing = required[type].filter(key => value[key] === undefined || value[key] === '');
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
+  if(type==='positions'&&(value.name.length<2||value.name.length>100))throw new Error('Албан тушаалын нэр 2–100 тэмдэгт байна');
   if(type==='fuel')validateFuelEntry(value,value.equipmentId?await get('equipment',value.equipmentId,db):null);
   if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
   if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
@@ -172,8 +195,9 @@ async function validate(type, body, db) {
   return value;
 }
 async function ensureUnique(type, value, excludeId, db) {
-  if (!['employees','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs','payrollEntries'].includes(type)) return;
+  if (!['employees','positions','attendance','equipment','assignments','campStays','bedAssignments','productionEntries','machineLogs','payrollEntries'].includes(type)) return;
   const rows = await all(type, db);
+  if(type==='positions'&&rows.some(row=>row.id!==Number(excludeId)&&positionKey(row.name)===positionKey(value.name)))throw new Error('Ийм албан тушаал бүртгэлтэй байна');
   if (type === 'machineLogs' && rows.some(row => row.id !== Number(excludeId) && row.date === value.date && row.workShift === value.workShift && Number(row.equipmentId) === Number(value.equipmentId))) throw new Error('Энэ техникийн тухайн ээлжийн бүртгэл аль хэдийн байна');
   if (type === 'productionEntries' && productionSourceKey(value) && rows.some(row => row.id !== Number(excludeId) && productionSourceKey(row) === productionSourceKey(value))) throw new Error('Энэ Excel мөр өмнө импортлогдсон байна. Эхлээд импортын түүхээс буцаана уу');
   if (type === 'employees' && rows.some(row => row.id !== Number(excludeId) && row.register === value.register)) throw new Error('Энэ регистрийн дугаартай ажилтан бүртгэлтэй байна');
@@ -355,16 +379,21 @@ app.post('/api/projects', auth, admin, async (req, res) => {
     res.json(rows[0]);
   } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'Ийм нэртэй төсөл байна' }); throw error; }
 });
+app.get('/api/roles',auth,admin,async(_req,res)=>{await ensureRoles();res.json(await projectRoles())});
+app.post('/api/roles',auth,admin,async(req,res)=>{await ensureRoles();const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if((await projectRoles()).some(row=>roleNameKey(row.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});const key=`custom_${randomBytes(6).toString('hex')}`;await query('INSERT INTO public.role_definitions(project_id,key,name,builtin) VALUES($1,$2,$3,false)',[currentProject(),key,name]);await audit(req,'roles','create',null,{key,name});res.json({key,name,builtin:false})});
+app.put('/api/roles/:key',auth,admin,async(req,res)=>{await ensureRoles();const list=await projectRoles(),row=list.find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if(list.some(item=>item.key!==row.key&&roleNameKey(item.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});await query('UPDATE public.role_definitions SET name=$1 WHERE project_id=$2 AND key=$3',[name,currentProject(),row.key]);await audit(req,'roles','update',null,{key:row.key,before:row.name,after:name});res.json({...row,name})});
+app.delete('/api/roles/:key',auth,admin,async(req,res)=>{await ensureRoles();const row=(await projectRoles()).find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});if(row.key==='admin')return res.status(400).json({error:'Админ эрхийг устгах боломжгүй'});if((await query('SELECT id FROM public.users WHERE project_id=$1 AND role=$2 LIMIT 1',[currentProject(),row.key])).rowCount)return res.status(400).json({error:'Энэ эрхийг хэрэглэгч ашиглаж байгаа тул эхлээд өөр эрх онооно уу'});await withTransaction(async db=>{await query('DELETE FROM public.role_permissions WHERE project_id=$1 AND role=$2',[currentProject(),row.key],db);await query('DELETE FROM public.role_definitions WHERE project_id=$1 AND key=$2',[currentProject(),row.key],db);await audit(req,'roles','delete',null,{key:row.key,name:row.name},db)});res.json({ok:true})});
 app.get('/api/permissions', auth, async (req, res) => {
+  await ensureRoles();
   if (req.user.role === 'admin') {
     const rows = (await query('SELECT role,permissions FROM public.role_permissions WHERE project_id=$1', [currentProject()])).rows;
-    return res.json(Object.fromEntries(roles.map(role => [role, permissionMatrix(role,defaultPermissions[role]||{},rows.find(row => row.role === role)?.permissions||{},[...types,'documents'])])));
+    return res.json(Object.fromEntries((await projectRoles()).map(({key:role}) => [role, permissionMatrix(role,defaultPermissions[role]||{},rows.find(row => row.role === role)?.permissions||{},[...types,'documents'])])));
   }
   res.json({ [req.user.role]: permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},(await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role])).rows[0]?.permissions||{},[...types,'documents']) });
 });
 app.put('/api/permissions/:role', auth, admin, async (req, res) => {
   const role = req.params.role;
-  if (!roles.includes(role)) return res.status(400).json({ error: 'Эрх буруу байна' });
+  if (!(await projectRoles()).some(row=>row.key===role)) return res.status(400).json({ error: 'Эрх буруу байна' });
   const input = req.body?.permissions;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return res.status(400).json({ error: 'Эрхийн тохиргоо буруу байна' });
   const actions = ['read','create','update','delete'];
@@ -426,7 +455,7 @@ app.delete('/api/documents/:id',auth,documentEditor,async(req,res)=>{
 app.get('/api/users', auth, admin, async (_req, res) => res.json((await query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users WHERE project_id=$1 OR role=$2 ORDER BY id', [currentProject(),'admin'])).rows));
 app.post('/api/users', auth, admin, async (req, res) => {
   const { username, name, role, password, campId, projectId, employeeId } = req.body;
-  if (!username || !name || !roles.includes(role) || !validPassword(password)) return res.status(400).json({ error: 'Нэр, эрх, 8+ тэмдэгттэй том/жижиг үсэг, тоо, тэмдэгт орсон нууц үг оруулна уу' });
+  if (!username || !name || !(await projectRoles()).some(row=>row.key===role) || !validPassword(password)) return res.status(400).json({ error: 'Нэр, эрх, 8+ тэмдэгттэй том/жижиг үсэг, тоо, тэмдэгт орсон нууц үг оруулна уу' });
   if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
   if (!await get('employees', employeeId)) return res.status(400).json({ error: 'Ажилтан сонгоно уу' });
   const chosenProject = role === 'admin' ? Number(projectId || currentProject()) : currentProject();
@@ -442,7 +471,7 @@ app.post('/api/users', auth, admin, async (req, res) => {
 app.patch('/api/users/:id', auth, admin, async (req, res) => {
   const user = (await query('SELECT * FROM public.users WHERE id=$1', [Number(req.params.id)])).rows[0];
   if (!user || (user.role !== 'admin' && Number(user.project_id) !== currentProject())) return res.status(404).json({ error: 'Хэрэглэгч олдсонгүй' });
-  const role = roles.includes(req.body.role) ? req.body.role : user.role;
+  const role = (await projectRoles()).some(row=>row.key===req.body.role) ? req.body.role : user.role;
   const campId = role === 'camp' ? Number(req.body.campId ?? user.camp_id) : null;
   if (role === 'camp' && !await get('camps', campId)) return res.status(400).json({ error: 'Camp ахлахын camp-ийг сонгоно уу' });
   const active = req.body.active === undefined ? user.active : Boolean(req.body.active);
@@ -520,6 +549,8 @@ function visibleSubmissions(rows,user,assignments,employees){
   return rows.filter(row=>{const task=assignmentMap.get(row.assignment_id);return task&&(Number(task.campId)===Number(user.campId)||employeeCamp.get(Number(task.employeeId))===Number(user.campId))});
 }
 app.get('/api/bootstrap',auth,async(req,res)=>{
+  await ensureRoles();
+  await ensurePositions();
   const [recordResult,submissionResult,userResult]=await Promise.all([
     query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) AND project_id=$2 ORDER BY id DESC',[types,currentProject()]),
     query(submissionSql,[currentProject()]),
@@ -531,7 +562,7 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
   const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},permissionRows[0]?.permissions||{},[...types,'documents']);
   const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
-  res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,projectId:currentProject()});
+  res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,roles:await projectRoles(),projectId:currentProject()});
 });
 app.get('/api/records/:type',auth,async(req,res)=>{
   const type=req.params.type;
@@ -575,6 +606,14 @@ app.put('/api/records/:type/:id', auth, editor, async (req, res) => {
     if (type === 'mealFeedback' && req.user.role === 'hr' && Object.keys(value).some(key => !['approvedAllowance','hrStatus','hrNote'].includes(key) && JSON.stringify(value[key]) !== JSON.stringify(old[key]))) throw new Error('HR зөвхөн нэмэгдэл ба шийдвэр засна');
     if (!await canEditRecord(req, type, value) || !await canEditRecord(req, type, old)) return res.status(403).json({ error: 'Өөр camp-ийн бүртгэл засах эрхгүй' });
     await ensureUnique(type, value, id);
+    if(type==='positions'){
+      await withTransaction(async db=>{
+        if(old.name!==value.name)await query("UPDATE public.records SET body=jsonb_set(body,'{position}',to_jsonb($1::text)),updated_at=now() WHERE type='employees' AND project_id=$2 AND body->>'position'=$3",[value.name,currentProject(),old.name],db);
+        await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),type,Number(id),currentProject()],db);
+        await audit(req,type,'update',Number(id),{changes:changesBetween(old,value)},db);
+      });
+      return res.json(await get(type,id));
+    }
     if (type === 'shiftOverrides') {
       await withTransaction(async db => {await undoShiftOverride(id,db);await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),type,Number(id),currentProject()],db);const changed=await applyShiftOverride(id,value,db);await audit(req,type,'update',Number(id),{changedAssignments:changed,changes:changesBetween(old,value)},db)});
       return res.json(await get(type,id));
@@ -603,6 +642,7 @@ app.delete('/api/records/:type/:id', auth, editor, async (req, res) => {
       const linkedRows=(await query('SELECT type,id,body FROM public.records WHERE project_id=$1',[currentProject()],db)).rows.reduce((group,row)=>{(group[row.type]??=[]).push({id:row.id,...row.body});return group},{});
       const dependent=findDependentRecord(type,id,linkedRows);
       if(dependent)throw new Error(`Холбоотой ${dependent.type} #${dependent.id} бүртгэл байгаа тул устгах боломжгүй`);
+      if(type==='positions'&&(await all('employees',db)).some(row=>row.position===old.name))throw new Error('Энэ албан тушаалыг ажилтан ашиглаж байгаа тул эхлээд өөр албан тушаал онооно уу');
       if(type==='employees'&&((await query('SELECT id FROM public.users WHERE employee_id=$1 LIMIT 1',[Number(id)],db)).rowCount||(await query('SELECT id FROM public.documents WHERE employee_id=$1 AND project_id=$2 LIMIT 1',[Number(id),currentProject()],db)).rowCount))throw new Error('Хэрэглэгч эсвэл PDF баримттай ажилтныг устгах боломжгүй');
       if(type==='camps'&&(await query('SELECT id FROM public.users WHERE camp_id=$1 AND project_id=$2 LIMIT 1',[Number(id),currentProject()],db)).rowCount)throw new Error('Хэрэглэгч оноосон Camp-ийг устгах боломжгүй');
       if (type === 'plans') {

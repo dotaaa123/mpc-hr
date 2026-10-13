@@ -10,6 +10,7 @@ export const viewPages = [
   {key:'tasks',label:'Ажлын хуваарь',source:'assignments'},
   {key:'reports',label:'Тайлан',adminOnly:true},
   {key:'users',label:'Хэрэглэгчид',adminOnly:true},
+  {key:'roles',label:'Эрхийн нэрс',adminOnly:true},
   {key:'permissions',label:'Эрхийн тохиргоо',adminOnly:true,alwaysVisible:true},
   {key:'audit',label:'Аудит лог',adminOnly:true},
   {key:'desktopRelease',label:'Windows програм',adminOnly:true},

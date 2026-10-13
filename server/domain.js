@@ -1,7 +1,8 @@
 export const roles = ['admin', 'dispatcher', 'clerk', 'camp', 'hr'];
-export const types = ['employees', 'attendance', 'equipment', 'equipmentTransfers', 'camps', 'warehouses', 'plans', 'productionEntries', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments', 'payrollEntries'];
+export const types = ['employees', 'positions', 'attendance', 'equipment', 'equipmentTransfers', 'camps', 'warehouses', 'plans', 'productionEntries', 'assignments', 'fuel', 'other', 'machineLogs', 'guests', 'campStays', 'maintenance', 'travelExpenses', 'shiftOverrides', 'mealMenus', 'mealFeedback', 'bedAssignments', 'payrollEntries'];
 export const required = {
   employees: ['lastName', 'firstName', 'register', 'position'],
+  positions: ['name'],
   attendance: ['date','employeeId','status'],
   equipment: ['parkNo', 'kind', 'model'],
   equipmentTransfers: ['removedEquipmentId','installedEquipmentId','partName','quantity','removedDate','installedDate'],
@@ -25,6 +26,7 @@ export const required = {
 };
 export const permitted = {
   employees: ['code','lastName','firstName','clanName','register','civilId','phone','email','homeAddress','branch','position','baseSalary','socialSalary','insuredShare','payrollPlannedDays','bankName','bankAccount','lookupAccount','professionCode','insuredType','birthDate','gender','hireDate','validStatus','verificationNote','terminationDate','terminationReason','terminationInitiator','disciplinePercent','campId','shiftStart','shiftGroup','rotationPattern','initialDayNight','status','notes','sourceSheet','sourceRow'],
+  positions: ['name'],
   attendance: ['date','employeeId','status','plannedHours','actualHours','campId','notes'],
   equipment: ['parkNo','kind','brand','model','vin','plateNo','site','warehouseId','owner','currentHours','haulCapacity','fuelRate','tankCapacityLiters','status','availability','year','sourceStatus','operatorAId','operatorBId','operatorCId','operatorDId','contractNo','contractCompany','unitPriceMnt','currency','warranty','certificate','customsDocument','passport','sourceSheet','sourceRow','sourceData','notes'],
   equipmentTransfers: ['removedEquipmentId','installedEquipmentId','partName','partNo','serialNo','quantity','condition','removedDate','removedHours','installedPartName','installedSerialNo','installedDate','installedHours','installedKm','performedBy','approvedBy','referenceNo','notes'],

@@ -1,6 +1,7 @@
 // Book1.xlsx-ийн ирцийн өдөр тутмын багана, сарын хоёр хагасын бүтэц.
 // Эх Excel-ийн ажилтны мэдээлэл болон эвдэрсэн томьёог хуулж нийтлэхгүй.
 import { saveBlob } from './fileDownload.js';
+import ExcelJS from 'exceljs';
 export const attendanceCode = {arrival:'Ир',day:'Өд',departure:'Бу',night:'Шө',travel:'Зам',rest:'Ам',leave:'Ч',absent:'Т'};
 
 export function monthDates(month) {
@@ -21,7 +22,6 @@ export function attendanceSummary(daily,dates) {
 }
 
 export async function exportBook1Timesheet({month,employees,attendance,includeSalary=false}) {
-  const {default:ExcelJS}=await import('exceljs');
   const dates=monthDates(month);
   const workbook=new ExcelJS.Workbook();
   const sheet=workbook.addWorksheet('Цагийн бүртгэл');
