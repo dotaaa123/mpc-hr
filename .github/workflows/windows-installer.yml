@@ -1,0 +1,45 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Installer version
+        required: true
+        default: 1.0.1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Windows build tools
+        shell: pwsh
+        run: |
+          choco install nuget.commandline innosetup -y --no-progress
+          $env:PATH += ';C:\Program Files (x86)\Inno Setup 6'
+          if (-not (Get-Command nuget -ErrorAction SilentlyContinue)) { throw 'NuGet was not installed' }
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { throw 'Inno Setup was not installed' }
+      - name: Install Flutter
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$env:RUNNER_TEMP\flutter"
+          "$env:RUNNER_TEMP\flutter\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:RUNNER_TEMP\flutter\bin\flutter.bat" --version
+      - name: Build installer
+        shell: pwsh
+        env:
+          MPC_HR_URL: https://mpc-hr.vercel.app
+        run: |
+          $env:PATH += ';C:\Program Files (x86)\Inno Setup 6'
+          cd desktop
+          ./build_windows.ps1 -Version '${{ inputs.version }}'
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPC-HR-Windows-${{ inputs.version }}
+          path: |
+            desktop/build/installer/MPC-HR-Setup.exe
+            desktop/build/installer/MPC-HR-${{ inputs.version }}-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
