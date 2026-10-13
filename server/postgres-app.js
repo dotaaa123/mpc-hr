@@ -378,6 +378,13 @@ app.get('/api/audit', auth, admin, async (req, res) => {
   const { rows } = await query('SELECT id,username,role,page,action,record_id AS "recordId",details,created_at AS "createdAt" FROM public.audit_logs WHERE project_id=$1 AND ($2::text = \'\' OR role=$2) AND ($3::text = \'\' OR page=$3) ORDER BY id DESC LIMIT 1000', [currentProject(), role, page]);
   res.json(rows);
 });
+app.get('/api/notifications',auth,async(req,res,next)=>{try{
+  const {rows}=await query(`SELECT a.id,a.username,a.role,a.page,a.action,a.record_id AS "recordId",a.created_at AS "createdAt",u.name AS "userName",u.employee_id AS "employeeId" FROM public.audit_logs a LEFT JOIN public.users u ON u.id=a.user_id WHERE a.project_id=$1 AND a.created_at>=now()-interval '7 days' ORDER BY a.id DESC LIMIT 150`,[currentProject()]);
+  const pages=[...new Set(rows.map(row=>row.page))];
+  const readable=new Set(req.user.role==='admin'?pages:(await Promise.all(pages.map(async page=>await allowed(req,page,'read')?page:null))).filter(Boolean));
+  const employees=await all('employees');
+  res.json(rows.filter(row=>readable.has(row.page)).slice(0,40).map(row=>{const employee=employees.find(item=>item.id===Number(row.employeeId));return {id:row.id,username:row.username,actorName:employee?`${employee.lastName} ${employee.firstName}`:row.userName||row.username,role:row.role,page:row.page,action:row.action,recordId:row.recordId,createdAt:row.createdAt}}));
+}catch(error){next(error)}});
 app.get('/api/imports', auth, admin, async (_req, res) => res.json((await query('SELECT id,type,filename,row_count AS "rowCount",created_at AS "createdAt",undone_at AS "undoneAt" FROM public.import_batches WHERE project_id=$1 ORDER BY id DESC LIMIT 200', [currentProject()])).rows));
 const documentEditor = async (req,res,next) => {try{const action=req.method==='GET'?'read':req.method==='DELETE'?'delete':'create';return await allowed(req,'documents',action)?next():res.status(403).json({error:'HR баримтын энэ үйлдэлд эрхгүй'})}catch(error){next(error)}};
 const documentFields = ['date','companyName','companyAddress','companyPhone','companyEmail','contractType','orderNumber','city','legalBasis','effectiveDate','trialMonths','salaryAmount','executiveName','preparedBy','reviewedBy','initiator','reason','location','startDate','endDate','approvalDecision','payMode','payCondition','purpose'];
