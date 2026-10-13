@@ -4,9 +4,9 @@ import { DownloadOutlined, UploadOutlined } from '@ant-design/icons';
 
 const CHUNK = 1024 * 1024;
 const PUBLIC_RELEASE = {
-  filename: 'MPC-HR-1.0.6-Windows.zip',
-  version: '1.0.6',
-  url: 'https://github.com/dotaaa123/mpc-hr/releases/download/v1.0.6/MPC-HR-1.0.6-Windows.zip',
+  filename: 'MPC-HR-1.0.7-Windows.zip',
+  version: '1.0.7',
+  url: 'https://github.com/dotaaa123/mpc-hr/releases/download/v1.0.7/MPC-HR-1.0.7-Windows.zip',
 };
 const releaseRequest = async (path, options={}) => {
   const projectId=sessionStorage.getItem('mpc-project-id');
