@@ -18,13 +18,10 @@ namespace {
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
-/// Registry key for app theme preference.
-///
-/// A value of 0 indicates apps should use dark mode. A non-zero or missing
-/// value indicates apps should use light mode.
-constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
-  L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
+// Windows 11 title bar attributes. Older Windows versions ignore them.
+constexpr DWORD kCaptionColorAttribute = 35;
+constexpr DWORD kCaptionTextColorAttribute = 36;
+constexpr DWORD kBorderColorAttribute = 34;
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
@@ -273,16 +270,18 @@ void Win32Window::OnDestroy() {
 }
 
 void Win32Window::UpdateTheme(HWND const window) {
-  DWORD light_mode;
-  DWORD light_mode_size = sizeof(light_mode);
-  LSTATUS result = RegGetValue(HKEY_CURRENT_USER, kGetPreferredBrightnessRegKey,
-                               kGetPreferredBrightnessRegValue,
-                               RRF_RT_REG_DWORD, nullptr, &light_mode,
-                               &light_mode_size);
-
-  if (result == ERROR_SUCCESS) {
-    BOOL enable_dark_mode = light_mode == 0;
-    DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                          &enable_dark_mode, sizeof(enable_dark_mode));
-  }
+  // Keep the native minimize, maximize and close controls, with the same
+  // light palette as the web app's header.
+  BOOL enable_dark_mode = FALSE;
+  DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        &enable_dark_mode, sizeof(enable_dark_mode));
+  COLORREF caption = RGB(255, 255, 255);
+  COLORREF caption_text = RGB(34, 35, 44);
+  COLORREF border = RGB(237, 240, 243);
+  DwmSetWindowAttribute(window, kCaptionColorAttribute,
+                        &caption, sizeof(caption));
+  DwmSetWindowAttribute(window, kCaptionTextColorAttribute,
+                        &caption_text, sizeof(caption_text));
+  DwmSetWindowAttribute(window, kBorderColorAttribute,
+                        &border, sizeof(border));
 }

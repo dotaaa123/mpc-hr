@@ -11,6 +11,12 @@
 .sidebar .ant-layout-sider-children{display:flex;flex-direction:column;height:100%;min-height:0}
 .sidebar .sidebar-brand{flex:0 0 78px}
 .sidebar .side-menu{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;padding-bottom:24px!important}
+.app-layout{height:100dvh!important;min-height:0!important;overflow:hidden}
+.app-layout>.ant-layout{height:100%;min-height:0;min-width:0;overflow:hidden}
+.app-layout .sidebar{height:100dvh;min-height:0}
+.app-layout .topbar{flex:0 0 78px;position:relative;z-index:15}
+.app-layout .main-content{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+@media(max-width:760px){.app-layout .topbar{flex-basis:64px}}
 .sidebar .sidebar-bottom{position:static;flex:0 0 auto;min-height:42px;display:flex;align-items:center;padding:0 22px 8px;background:#fff}
 .sidebar.ant-layout-sider-collapsed .sidebar-bottom{display:none}
 
