@@ -18,10 +18,10 @@ export function timesheetRows(employees,attendance,month,half){
     const values=Object.values(daily).filter(Boolean);
     const count=status=>values.filter(row=>row.status===status).length;
     const workHours=values.filter(row=>['day','night'].includes(row.status)).reduce((sum,row)=>sum+Number(row.actualHours||0),0);
-    const travelHours=count('travel')*8;
+    const travelHours=(count('travel')+count('arrival')+count('departure'))*8;
     const missingDays=dates.filter(date=>eligible(date)&&!records.has(`${employee.id}:${date}`)).length;
     const employmentConflictDays=dates.filter(date=>!eligible(date)&&records.has(`${employee.id}:${date}`)).length;
     const plannedHours=values.reduce((sum,row)=>sum+Number(row.plannedHours||0),0);
-    return {employee,daily,dayCount:count('day'),nightCount:count('night'),travelCount:count('travel'),absentCount:count('absent'),restCount:count('rest'),leaveCount:count('leave'),workHours,travelHours,plannedHours,creditedHours:workHours+travelHours,missingDays,employmentConflictDays,missingWorkHours:values.filter(row=>['day','night'].includes(row.status)&&!(Number(row.actualHours)>0)).length};
+    return {employee,daily,dayCount:count('day'),nightCount:count('night'),arrivalCount:count('arrival'),departureCount:count('departure'),travelCount:count('travel')+count('arrival')+count('departure'),absentCount:count('absent'),restCount:count('rest'),leaveCount:count('leave'),workHours,travelHours,plannedHours,creditedHours:workHours+travelHours,missingDays,employmentConflictDays,missingWorkHours:values.filter(row=>['day','night'].includes(row.status)&&!(Number(row.actualHours)>0)).length};
   });
 }

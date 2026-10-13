@@ -31,7 +31,7 @@ export const permitted = {
   camps: ['name','location','capacity','workType','manager','notes'],
   warehouses: ['name','location','manager','notes'],
   plans: ['name','startDate','endDate','site','warehouseId','shift','targetOutput','outputUnit','unitRevenue','requiredEquipment','equipmentNeeds','requiredWorkers','employeeIds','equipmentIds','plannedHours','plannedFuel','notes'],
-  productionEntries: ['date','startDate','endDate','kind','shift','haulParkNo','excavatorParkNo','pit','block','level','material','materialType','race','dump','capacity','amount','sourceFile','sourceSheet','sourceRow','notes'],
+  productionEntries: ['date','startDate','endDate','kind','shift','operatorId','haulParkNo','excavatorParkNo','pit','block','level','material','materialType','race','dump','capacity','amount','sourceFile','sourceSheet','sourceRow','notes'],
   assignments: ['date','title','site','shift','employeeId','equipmentId','planId','campId','plannedHours','plannedFuel','plannedOutput','autoPlanId','scheduleKey','notes'],
   fuel: ['date','kind','equipmentId','parkNo','equipmentType','liters','receivedTime','motorHours','pricePerLiter','supplier','notes'],
   other: ['date','name','category','amount','notes'],

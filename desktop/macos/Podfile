@@ -39,4 +39,18 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
+
+  # iCloud Drive stamps Finder info onto bundles under Documents. codesign
+  # rejects that as "resource fork, Finder information, or similar detritus".
+  frameworks_script = File.expand_path('Pods/Target Support Files/Pods-Runner/Pods-Runner-frameworks.sh', __dir__)
+  if File.exist?(frameworks_script)
+    contents = File.read(frameworks_script)
+    unless contents.include?('Strip Finder metadata before codesign')
+      contents.sub!(
+        'code_sign_if_enabled() {',
+        'code_sign_if_enabled() {' + "\n" + '  # Strip Finder metadata before codesign' + "\n" + '  /usr/bin/xattr -cr "$1" 2>/dev/null || true'
+      )
+      File.write(frameworks_script, contents)
+    end
+  end
 end
