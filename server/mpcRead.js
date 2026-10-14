@@ -64,3 +64,26 @@ export async function readMpcView(view, credentials) {
   }
   return { title:config.title, columns:config.columns, rows, total:view==='transfers'?rows.length:result.total??rows.length, fetchedAt:new Date().toISOString() };
 }
+
+export async function readMpcDetail(view, id, credentials) {
+  const config=mpcViews[view];
+  if(!config || !/^[\w-]+$/.test(String(id)))throw new Error('MPC бичлэг олдсонгүй');
+  const base=(process.env.MPC_API_BASE_URL||'https://selbeg-api.vercel.app/api').replace(/\/$/,'');
+  const cacheKey=createHash('sha256').update(JSON.stringify([base,credentials])).digest('hex');
+  let cached=tokenCache.get(cacheKey);
+  if(!cached || cached.expiresAt<=Date.now()) {
+    const login=await fetch(`${base}/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials),signal:AbortSignal.timeout(20000)});
+    if(!login.ok)throw new Error('MPC API-д нэвтрэх боломжгүй');
+    cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
+  }
+  const path=config.path.split('?')[0];
+  let response=await fetch(`${base}${path}/${encodeURIComponent(id)}`,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
+  if(response.status===401){
+    const login=await fetch(`${base}/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials),signal:AbortSignal.timeout(20000)});
+    if(!login.ok)throw new Error('MPC API-д нэвтрэх боломжгүй');
+    cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
+    response=await fetch(`${base}${path}/${encodeURIComponent(id)}`,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
+  }
+  if(!response.ok)throw new Error(`MPC дэлгэрэнгүй мэдээлэл олдсонгүй (${response.status})`);
+  return response.json();
+}

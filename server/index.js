@@ -18,7 +18,7 @@ import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
-import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView } from './mpcRead.js';
+import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView, readMpcDetail } from './mpcRead.js';
 
 const app = express();
 const projectContext = new AsyncLocalStorage();
@@ -117,6 +117,13 @@ app.get('/api/mpc-read/:view',async(req,res)=>{
   try{const data=await readMpcView(req.params.view,openCredentials(stored.credential_ciphertext));res.set('Cache-Control','no-store');res.json(data)}
   catch(error){res.status(502).json({error:error.message})}
 });
+app.get('/api/mpc-read/:view/:id',async(req,res)=>{
+  const page=mpcPageKeys[req.params.view];
+  if(!page||!allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
+  const stored=db.prepare('SELECT credential_ciphertext FROM mpc_integrations WHERE project_id=?').get(currentProject());
+  if(!stored)return res.status(503).json({error:'MPC API холболт тохируулаагүй'});
+  try{res.set('Cache-Control','no-store');res.json(await readMpcDetail(req.params.view,req.params.id,openCredentials(stored.credential_ciphertext)))}catch(error){res.status(502).json({error:error.message})}
+});
 app.get('/api/readiness-operators',(req,res)=>{
   if(!allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});
   res.json(all('employees').map(({id,code,lastName,firstName,phone,branch})=>({id,code,lastName,firstName,phone,branch})));
@@ -169,7 +176,7 @@ function validate(type, body) {
   if (type==='mealFeedback'&&Number(get('employees',value.employeeId)?.campId)!==Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
   if (type==='bedAssignments'&&value.endDate&&value.endDate<value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (type==='maintenance'&&!get('equipment',value.equipmentId)) throw new Error('Техник олдсонгүй');
-  if (type==='maintenance') normalizeMaintenance(value);
+  if (type==='maintenance') {normalizeMaintenance(value);if(value.parts!==undefined&&(!Array.isArray(value.parts)||value.parts.some(part=>!String(part?.name||'').trim()||!Number.isInteger(Number(part.quantity))||Number(part.quantity)<1)))throw new Error('Сэлбэгийн нэр, тоо ширхэг буруу байна');if(value.transferIds!==undefined){if(!Array.isArray(value.transferIds))throw new Error('Сэлбэг салгалтын сонголт буруу байна');for(const id of value.transferIds){const transfer=get('equipmentTransfers',id);if(!transfer||![Number(transfer.removedEquipmentId),Number(transfer.installedEquipmentId)].includes(Number(value.equipmentId)))throw new Error('Сэлбэг салгалтын бүртгэл энэ техниктэй холбогдоогүй байна')}}}
   if (type==='shiftOverrides'&&(!get('employees',value.replacementEmployeeId)||value.originalEmployeeId&&!get('employees',value.originalEmployeeId)||Number(value.originalEmployeeId)===Number(value.replacementEmployeeId))) throw new Error('Ээлжийн ажилтан буруу байна');
   if (type==='mealFeedback'&&value.approvedAllowance!==undefined&&(!Number.isFinite(Number(value.approvedAllowance))||Number(value.approvedAllowance)<0)) throw new Error('Баталсан нэмэгдлийн дүн буруу байна');
   if (type==='mealFeedback'&&value.hrStatus&&!['pending','approved','rejected'].includes(value.hrStatus)) throw new Error('HR шийдвэр буруу байна');
@@ -323,6 +330,8 @@ app.patch('/api/me/password',auth,(req,res) => {
 });
 app.get('/api/projects',auth,admin,(_req,res)=>res.json(db.prepare('SELECT id,name,active FROM projects ORDER BY id').all()));
 app.post('/api/projects',auth,admin,(req,res)=>{const name=String(req.body?.name||'').trim();if(name.length<2||name.length>100)return res.status(400).json({error:'Төслийн нэр 2–100 тэмдэгт байна'});try{const id=db.prepare('INSERT INTO projects(name) VALUES(?)').run(name).lastInsertRowid;audit(req,'projects','create',id,{name});res.json({id,name,active:1})}catch{res.status(409).json({error:'Ийм нэртэй төсөл байна'})}});
+app.put('/api/projects/:id',auth,admin,(req,res)=>{const id=Number(req.params.id),name=String(req.body?.name||'').trim();if(name.length<2||name.length>100)return res.status(400).json({error:'Төслийн нэр 2–100 тэмдэгт байна'});const before=db.prepare('SELECT name FROM projects WHERE id=?').get(id);if(!before)return res.status(404).json({error:'Төсөл олдсонгүй'});try{db.prepare('UPDATE projects SET name=? WHERE id=?').run(name,id);audit(req,'projects','update',id,{before:before.name,after:name});res.json({id,name,active:1})}catch{res.status(409).json({error:'Ийм нэртэй төсөл байна'})}});
+app.delete('/api/projects/:id',auth,admin,(req,res)=>{const id=Number(req.params.id),row=db.prepare('SELECT name FROM projects WHERE id=?').get(id);if(!row)return res.status(404).json({error:'Төсөл олдсонгүй'});if(id===currentProject())return res.status(400).json({error:'Одоо сонгосон төслийг устгахгүй. Өөр төсөл сонгоно уу'});if(['users','documents','import_batches','audit_logs'].some(table=>db.prepare(`SELECT 1 FROM ${table} WHERE project_id=? LIMIT 1`).get(id))||db.prepare("SELECT 1 FROM records WHERE project_id=? AND type<>'positions' LIMIT 1").get(id))return res.status(400).json({error:'Хэрэглэгч эсвэл бүртгэлтэй төслийг устгах боломжгүй'});db.exec('BEGIN');try{for(const table of ['mpc_integrations','role_permissions','role_definitions','records'])db.prepare(`DELETE FROM ${table} WHERE project_id=?`).run(id);db.prepare('DELETE FROM projects WHERE id=?').run(id);audit(req,'projects','delete',id,{name:row.name});db.exec('COMMIT');res.json({ok:true})}catch(error){db.exec('ROLLBACK');res.status(400).json({error:error.message})}});
 app.get('/api/roles',auth,admin,(_req,res)=>{ensureRoles();res.json(projectRoles())});
 app.post('/api/roles',auth,admin,(req,res)=>{ensureRoles();const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if(projectRoles().some(row=>roleNameKey(row.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});const key=`custom_${randomBytes(6).toString('hex')}`;db.prepare('INSERT INTO role_definitions(project_id,key,name,builtin) VALUES(?,?,?,0)').run(currentProject(),key,name);audit(req,'roles','create',null,{key,name});res.json({key,name,builtin:0})});
 app.put('/api/roles/:key',auth,admin,(req,res)=>{ensureRoles();const row=projectRoles().find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if(projectRoles().some(item=>item.key!==row.key&&roleNameKey(item.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});db.prepare('UPDATE role_definitions SET name=? WHERE project_id=? AND key=?').run(name,currentProject(),row.key);audit(req,'roles','update',null,{key:row.key,before:row.name,after:name});res.json({...row,name})});

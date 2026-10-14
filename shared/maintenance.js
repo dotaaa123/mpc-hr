@@ -6,6 +6,9 @@ const minutesOfDay=value=>{
 
 export function normalizeMaintenance(value) {
   const start=minutesOfDay(value.startTime);
+  if(value.callTime)minutesOfDay(value.callTime);
+  if(value.waitMinutes!==undefined && (!Number.isFinite(Number(value.waitMinutes))||Number(value.waitMinutes)<0||Number(value.waitMinutes)>1440))throw new Error('Хүлээлтийн минут 0–1440 байна');
+  if(value.motorHours!==undefined && (!Number.isFinite(Number(value.motorHours))||Number(value.motorHours)<0))throw new Error('Мото цаг 0-ээс бага байж болохгүй');
   if(value.endTime){
     const end=minutesOfDay(value.endTime);
     value.minutes=(end-start+1440)%1440;

@@ -43,7 +43,7 @@ export const permitted = {
   machineLogs: ['date','equipmentId','employeeId','workShift','shiftGroup','startHours','endHours','workedMotorHours','productiveHours','moveHours','fuelingHours','noFuelHours','noOperatorHours','surveyHours','safetyHours','loadingWaitHours','engineeringHours','personalHours','safetyMeetingHours','handoverHours','mealBreakHours','repairHours','lubricationHours','readyHours','weatherHours','managementHours','startKm','endKm','startTime','endTime','stopMinutes','stopReason','operatorConfirmed','masterConfirmed','dispatcherChecked','fuelUsed','notes'],
   guests: ['name','organization','phone','register','arrivalDate','departureDate','purpose','campId','notes'],
   campStays: ['date','category','employeeId','guestId','campId','count','breakfast','lunch','dinner','mealRate','lodgingRate','rentalCompany','notes'],
-  maintenance: ['date','equipmentId','reason','startTime','endTime','minutes','status','notes'],
+  maintenance: ['date','equipmentId','workOrderNo','shift','motorHours','failureCategory','failureDescription','callTime','startTime','endTime','waitMinutes','minutes','status','repairStatus','usedPartSerial','completedWork','nextWork','delayReason','mechanic','parts','transferIds','notes'],
   technicalReadiness: ['weekStart','equipmentId','dayStatus','nightStatus','dayOperatorId','nightOperatorId','notes'],
   travelExpenses: ['date','employeeId','amount','paid','route','notes'],
   shiftOverrides: ['date','originalEmployeeId','replacementEmployeeId','shift','reason','approvedBy','notes'],

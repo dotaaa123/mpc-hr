@@ -17,6 +17,7 @@ export const viewPages = [
   {key:'mpcIssues',label:'MPC · Зарлага',source:'equipment'},
   {key:'mpcTransfers',label:'MPC · Дотоод хөдөлгөөн',source:'equipment'},
   {key:'users',label:'Хэрэглэгчид',adminOnly:true},
+  {key:'projects',label:'Төслүүд',adminOnly:true},
   {key:'roles',label:'Эрхийн нэрс',adminOnly:true},
   {key:'permissions',label:'Эрхийн тохиргоо',adminOnly:true,alwaysVisible:true},
   {key:'audit',label:'Аудит лог',adminOnly:true},

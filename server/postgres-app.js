@@ -13,7 +13,7 @@ import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
-import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView } from './mpcRead.js';
+import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView, readMpcDetail } from './mpcRead.js';
 import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -146,6 +146,13 @@ app.get('/api/mpc-read/:view',async(req,res)=>{
   try{const data=await readMpcView(req.params.view,openCredentials(row.credential_ciphertext));res.set('Cache-Control','no-store');res.json(data)}
   catch(error){res.status(502).json({error:error.message})}
 });
+app.get('/api/mpc-read/:view/:id',async(req,res)=>{
+  const page=mpcPageKeys[req.params.view];
+  if(!page||!await allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
+  const row=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
+  if(!row)return res.status(503).json({error:'MPC API холболт тохируулаагүй'});
+  try{res.set('Cache-Control','no-store');res.json(await readMpcDetail(req.params.view,req.params.id,openCredentials(row.credential_ciphertext)))}catch(error){res.status(502).json({error:error.message})}
+});
 app.get('/api/readiness-operators',async(req,res)=>{
   if(!await allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});
   res.json((await all('employees')).map(({id,code,lastName,firstName,phone,branch})=>({id,code,lastName,firstName,phone,branch})));
@@ -212,7 +219,7 @@ async function validate(type, body, db) {
   if (type === 'mealFeedback' && Number((await get('employees',value.employeeId,db))?.campId) !== Number(value.campId)) throw new Error('Ажилтан сонгосон Camp-д харьяалагдахгүй байна');
   if (type === 'bedAssignments' && value.endDate && value.endDate < value.startDate) throw new Error('Дуусах өдөр эхлэх өдрөөс өмнө байж болохгүй');
   if (['maintenance'].includes(type) && !await get('equipment', value.equipmentId, db)) throw new Error('Техник олдсонгүй');
-  if (type === 'maintenance') normalizeMaintenance(value);
+  if (type === 'maintenance') {normalizeMaintenance(value);if(value.parts!==undefined&&(!Array.isArray(value.parts)||value.parts.some(part=>!String(part?.name||'').trim()||!Number.isInteger(Number(part.quantity))||Number(part.quantity)<1)))throw new Error('Сэлбэгийн нэр, тоо ширхэг буруу байна');if(value.transferIds!==undefined){if(!Array.isArray(value.transferIds))throw new Error('Сэлбэг салгалтын сонголт буруу байна');for(const id of value.transferIds){const transfer=await get('equipmentTransfers',id,db);if(!transfer||![Number(transfer.removedEquipmentId),Number(transfer.installedEquipmentId)].includes(Number(value.equipmentId)))throw new Error('Сэлбэг салгалтын бүртгэл энэ техниктэй холбогдоогүй байна')}}}
   if (type === 'shiftOverrides') {
     if (!await get('employees', value.replacementEmployeeId, db)) throw new Error('Орлон ажиллах ажилтан олдсонгүй');
     if (value.originalEmployeeId && !await get('employees', value.originalEmployeeId, db)) throw new Error('Солигдох ажилтан олдсонгүй');
@@ -411,6 +418,8 @@ app.post('/api/projects', auth, admin, async (req, res) => {
     res.json(rows[0]);
   } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'Ийм нэртэй төсөл байна' }); throw error; }
 });
+app.put('/api/projects/:id',auth,admin,async(req,res)=>{const id=Number(req.params.id),name=String(req.body?.name||'').trim();if(name.length<2||name.length>100)return res.status(400).json({error:'Төслийн нэр 2–100 тэмдэгт байна'});const before=(await query('SELECT name FROM public.projects WHERE id=$1',[id])).rows[0];if(!before)return res.status(404).json({error:'Төсөл олдсонгүй'});try{await query('UPDATE public.projects SET name=$1 WHERE id=$2',[name,id]);await audit(req,'projects','update',id,{before:before.name,after:name});res.json({id,name,active:true})}catch(error){if(error.code==='23505')return res.status(409).json({error:'Ийм нэртэй төсөл байна'});throw error}});
+app.delete('/api/projects/:id',auth,admin,async(req,res)=>{const id=Number(req.params.id),row=(await query('SELECT name FROM public.projects WHERE id=$1',[id])).rows[0];if(!row)return res.status(404).json({error:'Төсөл олдсонгүй'});if(id===currentProject())return res.status(400).json({error:'Одоо сонгосон төслийг устгахгүй. Өөр төсөл сонгоно уу'});if((await query('SELECT 1 FROM public.users WHERE project_id=$1 LIMIT 1',[id])).rowCount||(await query("SELECT 1 FROM public.records WHERE project_id=$1 AND type<>'positions' LIMIT 1",[id])).rowCount||(await query('SELECT 1 FROM public.documents WHERE project_id=$1 LIMIT 1',[id])).rowCount||(await query('SELECT 1 FROM public.import_batches WHERE project_id=$1 LIMIT 1',[id])).rowCount||(await query('SELECT 1 FROM public.audit_logs WHERE project_id=$1 LIMIT 1',[id])).rowCount)return res.status(400).json({error:'Хэрэглэгч эсвэл бүртгэлтэй төслийг устгах боломжгүй'});await withTransaction(async db=>{await query("DELETE FROM public.records WHERE project_id=$1 AND type='positions'",[id],db);await query('DELETE FROM public.projects WHERE id=$1',[id],db);await audit(req,'projects','delete',id,{name:row.name},db)});res.json({ok:true})});
 app.get('/api/roles',auth,admin,async(_req,res)=>{await ensureRoles();res.json(await projectRoles())});
 app.post('/api/roles',auth,admin,async(req,res)=>{await ensureRoles();const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if((await projectRoles()).some(row=>roleNameKey(row.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});const key=`custom_${randomBytes(6).toString('hex')}`;await query('INSERT INTO public.role_definitions(project_id,key,name,builtin) VALUES($1,$2,$3,false)',[currentProject(),key,name]);await audit(req,'roles','create',null,{key,name});res.json({key,name,builtin:false})});
 app.put('/api/roles/:key',auth,admin,async(req,res)=>{await ensureRoles();const list=await projectRoles(),row=list.find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if(list.some(item=>item.key!==row.key&&roleNameKey(item.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});await query('UPDATE public.role_definitions SET name=$1 WHERE project_id=$2 AND key=$3',[name,currentProject(),row.key]);await audit(req,'roles','update',null,{key:row.key,before:row.name,after:name});res.json({...row,name})});
