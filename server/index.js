@@ -7,11 +7,11 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js';
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
-import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
+import { documentKinds } from './documentKinds.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
-import { rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
+import { buildRosterSequence, rosterEmployeeView, rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
@@ -47,6 +47,7 @@ if (!db.prepare('PRAGMA table_info(import_batches)').all().some(row=>row.name===
 if (!db.prepare('PRAGMA table_info(users)').all().some(row=>row.name==='project_id')) db.exec('ALTER TABLE users ADD COLUMN project_id INTEGER');
 if (!db.prepare('PRAGMA table_info(users)').all().some(row=>row.name==='employee_id')) db.exec('ALTER TABLE users ADD COLUMN employee_id INTEGER');
 if (!db.prepare('PRAGMA table_info(records)').all().some(row=>row.name==='project_id')) db.exec('ALTER TABLE records ADD COLUMN project_id INTEGER');
+db.exec("CREATE INDEX IF NOT EXISTS records_roster_date ON records(project_id, json_extract(body,'$.date')) WHERE type='rosterEntries'");
 if (!db.prepare('PRAGMA table_info(records)').all().some(row=>row.name==='import_batch_id')) db.exec('ALTER TABLE records ADD COLUMN import_batch_id INTEGER');
 if (!db.prepare('PRAGMA table_info(projects)').all().some(row=>row.name==='positions_seeded')) db.exec('ALTER TABLE projects ADD COLUMN positions_seeded INTEGER NOT NULL DEFAULT 0');
 if (!db.prepare('PRAGMA table_info(projects)').all().some(row=>row.name==='roles_seeded')) db.exec('ALTER TABLE projects ADD COLUMN roles_seeded INTEGER NOT NULL DEFAULT 0');
@@ -337,7 +338,7 @@ app.post('/api/roles',auth,admin,(req,res)=>{ensureRoles();const name=String(req
 app.put('/api/roles/:key',auth,admin,(req,res)=>{ensureRoles();const row=projectRoles().find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});const name=String(req.body?.name||'').trim();if(name.length<2||name.length>60)return res.status(400).json({error:'Эрхийн нэр 2–60 тэмдэгт байна'});if(projectRoles().some(item=>item.key!==row.key&&roleNameKey(item.name)===roleNameKey(name)))return res.status(409).json({error:'Ийм нэртэй эрх байна'});db.prepare('UPDATE role_definitions SET name=? WHERE project_id=? AND key=?').run(name,currentProject(),row.key);audit(req,'roles','update',null,{key:row.key,before:row.name,after:name});res.json({...row,name})});
 app.delete('/api/roles/:key',auth,admin,(req,res)=>{ensureRoles();const row=projectRoles().find(item=>item.key===req.params.key);if(!row)return res.status(404).json({error:'Эрх олдсонгүй'});if(row.key==='admin')return res.status(400).json({error:'Админ эрхийг устгах боломжгүй'});if(db.prepare('SELECT id FROM users WHERE project_id=? AND role=? LIMIT 1').get(currentProject(),row.key))return res.status(400).json({error:'Энэ эрхийг хэрэглэгч ашиглаж байгаа тул эхлээд өөр эрх онооно уу'});db.prepare('DELETE FROM role_permissions WHERE project_id=? AND role=?').run(currentProject(),row.key);db.prepare('DELETE FROM role_definitions WHERE project_id=? AND key=?').run(currentProject(),row.key);audit(req,'roles','delete',null,{key:row.key,name:row.name});res.json({ok:true})});
 app.get('/api/permissions',auth,(req,res)=>{if(req.user.role==='admin'){const stored=db.prepare('SELECT role,permissions FROM role_permissions WHERE project_id=?').all(currentProject());return res.json(Object.fromEntries(projectRoles().map(({key:role})=>[role,permissionMatrix(role,defaultPermissions[role]||{},JSON.parse(stored.find(row=>row.role===role)?.permissions||'{}'),[...types,'documents'])])))}res.json({[req.user.role]:permissionsFor(req.user)})});
-app.put('/api/permissions/:role',auth,admin,(req,res)=>{const role=req.params.role,input=req.body?.permissions;if(!projectRoles().some(row=>row.key===role)||!input||typeof input!=='object'||Array.isArray(input))return res.status(400).json({error:'Эрхийн тохиргоо буруу байна'});const actions=['read','create','update','delete'];const permissions=Object.fromEntries(Object.entries(input).filter(([page])=>permissionPages.includes(page)).map(([page,list])=>[page,Array.isArray(list)?list.filter(action=>actions.includes(action)&&((role!=='admin'&&!viewPages.some(view=>view.key===page))||action==='read')):[]]));if(role==='admin')permissions.permissions=['read'];db.prepare('INSERT INTO role_permissions(project_id,role,permissions) VALUES(?,?,?) ON CONFLICT(project_id,role) DO UPDATE SET permissions=excluded.permissions,updated_at=CURRENT_TIMESTAMP').run(currentProject(),role,JSON.stringify(permissions));audit(req,'permissions','update',null,{role,permissions});res.json({role,permissions})});
+app.put('/api/permissions/:role',auth,admin,(req,res)=>{const role=req.params.role,input=req.body?.permissions;if(!projectRoles().some(row=>row.key===role)||!input||typeof input!=='object'||Array.isArray(input))return res.status(400).json({error:'Эрхийн тохиргоо буруу байна'});const actions=['read','create','update','delete'];const permissions=Object.fromEntries(Object.entries(input).filter(([page])=>permissionPages.includes(page)).map(([page,list])=>[page,Array.isArray(list)?list.filter(action=>actions.includes(action)&&((role!=='admin'&&!viewPages.some(view=>view.key===page))||action==='read')):[]]));if(role==='admin')permissions.permissions=['read'];db.prepare('INSERT INTO role_permissions(project_id,role,permissions) VALUES(?,?,?) ON CONFLICT(project_id,role) DO UPDATE SET permissions=excluded.permissions,updated_at=CURRENT_TIMESTAMP').run(currentProject(),role,JSON.stringify(permissions));audit(req,'permissions','update',null,{role,permissions});res.json({role,permissions:permissionMatrix(role,defaultPermissions[role]||{},permissions,[...types,'documents'])})});
 app.get('/api/audit',auth,admin,(req,res)=>{const role=String(req.query.role||''),page=String(req.query.page||'');res.json(db.prepare(`SELECT id,username,role,page,action,record_id AS recordId,details,created_at AS createdAt FROM audit_logs WHERE project_id=? AND (?='' OR role=?) AND (?='' OR page=?) ORDER BY id DESC LIMIT 1000`).all(currentProject(),role,role,page,page).map(row=>({...row,details:JSON.parse(row.details)})))});
 app.get('/api/notifications',auth,(req,res)=>{
   const readable=permissionsFor(req.user);
@@ -358,6 +359,7 @@ app.post('/api/documents',auth,documentEditor,async(req,res)=>{try{
   const ids=Array.isArray(req.body?.approverIds)?req.body.approverIds.slice(0,8):[];
   const approvers=ids.map(id=>{const person=get('employees',id);if(!person)throw new Error('Батлах ажилтан энэ төсөлд байхгүй');return {employeeId:person.id,position:person.position||'',name:`${person.lastName||''} ${person.firstName||''}`.trim()}});
   if(kind==='termination'&&!fields.legalBasis)return res.status(400).json({error:'Ажлаас чөлөөлөх тушаалын хуулийн үндэслэлийг оруулна уу'});
+  const {createEmployeePdf}=await import('./pdfDocuments.js');
   const pdf=await createEmployeePdf({kind,employee,fields:{...fields,projectName:db.prepare('SELECT name FROM projects WHERE id=?').get(currentProject())?.name},approvers});
   const result=db.prepare('INSERT INTO documents(project_id,employee_id,kind,fields,approvers,pdf,created_by) VALUES(?,?,?,?,?,?,?)').run(currentProject(),employee.id,kind,JSON.stringify(fields),JSON.stringify(approvers),pdf,req.user.id);
   audit(req,'documents','create',result.lastInsertRowid,{employeeId:employee.id,kind,fields,approvers});res.json({id:result.lastInsertRowid,employeeId:employee.id,kind,fields,approvers,createdAt:new Date().toISOString()});
@@ -454,9 +456,19 @@ app.get('/api/bootstrap',auth,(req,res)=>{
   const employees=all('employees');
   const assignments=all('assignments');
   const permissions=permissionsFor(req.user);
-  const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees):[]]));
+  const records=Object.fromEntries(types.map(type=>[type,type==='rosterEntries'?[]:req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees):[]]));
+  if(permissions.rosterSketch?.includes('read')&&!permissions.employees?.includes('read'))records.employees=employees.map(rosterEmployeeView);
   const users=req.user.role==='admin'?db.prepare('SELECT id,username,name,role,camp_id AS campId,project_id AS projectId,employee_id AS employeeId,active FROM users WHERE project_id=? OR role=? ORDER BY id').all(currentProject(),'admin'):[];
   res.json({records,submissions:submissionsForUser(req.user,assignments,employees),users,permissions,roles:projectRoles(),projectId:currentProject()});
+});
+app.get('/api/roster-entries',auth,(req,res)=>{
+  try{
+    if(!allowed(req,'rosterEntries','read'))return res.status(403).json({error:'Ростер харах эрхгүй'});
+    const {startDate,endDate}=req.query;
+    const dates=rosterRangeDates(startDate,endDate);
+    if(dates.length>31)throw new Error('Ростерын мэдээллийг 31 хоногоор татна уу');
+    res.json(db.prepare("SELECT id,body,created_at AS createdAt,updated_at AS updatedAt FROM records WHERE type='rosterEntries' AND project_id=? AND json_extract(body,'$.date')>=? AND json_extract(body,'$.date')<? ORDER BY id DESC").all(currentProject(),startDate,endDate).map(row=>({...JSON.parse(row.body),id:row.id,createdAt:row.createdAt,updatedAt:row.updatedAt})));
+  }catch(error){res.status(400).json({error:error.message})}
 });
 app.post('/api/roster-entries/range',auth,(req,res)=>{
   try {
@@ -488,6 +500,31 @@ app.post('/api/roster-entries/range',auth,(req,res)=>{
         }
       }
       db.exec('COMMIT');res.json({count:dates.length,created,updated});
+    }catch(error){db.exec('ROLLBACK');throw error}
+  }catch(error){res.status(400).json({error:error.message})}
+});
+app.post('/api/roster-entries/sequence',auth,(req,res)=>{
+  try {
+    const {employeeIds,startDate,pattern,repeatCount=1,notes=''}=req.body||{};
+    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500||new Set(employeeIds.map(Number)).size!==employeeIds.length)throw new Error('1–500 ажилтан давхардуулахгүй сонгоно уу');
+    const days=buildRosterSequence(startDate,pattern,repeatCount);
+    if(employeeIds.length*days.length>100000)throw new Error('Нэг удаад 100,000 өдрөөс олон бүртгэл оруулахгүй. Ажилтнаа хэсэгчилнэ үү');
+    const people=new Map(all('employees').map(row=>[Number(row.id),row]));
+    const ids=employeeIds.map(Number);
+    if(ids.some(id=>!Number.isSafeInteger(id)||!people.has(id)))throw new Error('Сонгосон ажилтан энэ төсөлд олдсонгүй');
+    const existing=new Map(all('rosterEntries').filter(row=>ids.includes(Number(row.employeeId))).map(row=>[`${row.employeeId}:${row.date}`,row]));
+    const values=ids.flatMap(employeeId=>days.map(({date,code})=>({date,code,employeeId,notes:String(notes).trim().slice(0,2000)})));
+    const created=values.filter(value=>!existing.has(`${value.employeeId}:${value.date}`)).length;
+    const updated=values.length-created;
+    if(created&&!allowed(req,'rosterEntries','create')||updated&&!allowed(req,'rosterEntries','update'))return res.status(403).json({error:'Ростерын төлөв нэмэх эсвэл засах эрхгүй'});
+    db.exec('BEGIN');
+    try {
+      const stamp=new Date().toISOString();
+      const update=db.prepare("UPDATE records SET body=?,updated_at=? WHERE id=? AND type='rosterEntries' AND project_id=?");
+      const insert=db.prepare("INSERT INTO records(type,body,created_at,updated_at,project_id) VALUES('rosterEntries',?,?,?,?)");
+      for(const value of values){const old=existing.get(`${value.employeeId}:${value.date}`);if(old)update.run(JSON.stringify(value),stamp,old.id,currentProject());else insert.run(JSON.stringify(value),stamp,stamp,currentProject())}
+      audit(req,'rosterEntries','sequence',null,{employeeIds:ids,startDate,pattern,repeatCount:Number(repeatCount),days:days.length,created,updated});
+      db.exec('COMMIT');res.json({employeeCount:ids.length,days:days.length,count:values.length,created,updated});
     }catch(error){db.exec('ROLLBACK');throw error}
   }catch(error){res.status(400).json({error:error.message})}
 });

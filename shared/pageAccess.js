@@ -5,7 +5,7 @@ export const viewPages = [
   {key:'timesheet',label:'Цагийн мэдээ',source:'attendance'},
   {key:'payroll',label:'Цалин бодолт',source:'payrollEntries'},
   {key:'roster',label:'Ээлжийн мэдээ',source:'employees'},
-  {key:'rosterSketch',label:'Ростерын зураглал',source:'employees'},
+  {key:'rosterSketch',label:'Ростерын зураглал (ростерын харах эрхээр)',source:'rosterEntries'},
   {key:'campCheck',label:'Хүмүүсээ шалгах',campOnly:true,source:'attendance'},
   {key:'tasks',label:'Ажлын хуваарь',source:'assignments'},
   {key:'reports',label:'Тайлан',adminOnly:true},
@@ -42,6 +42,7 @@ export const permissionMatrix = (role, defaults, stored, recordTypes) => {
     for(const page of viewPages) {
       if(page.adminOnly||page.campOnly&&role!=='camp')matrix[page.key]=[];
     }
+    if(matrix.rosterEntries?.includes('read'))matrix.rosterSketch=['read'];
     return matrix;
   }
   const matrix=addViewPermissions('admin',Object.fromEntries(recordTypes.map(key=>[key,['read','create','update','delete']])));

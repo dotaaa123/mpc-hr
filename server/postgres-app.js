@@ -6,7 +6,7 @@ import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js'
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
-import { rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
+import { buildRosterSequence, rosterEmployeeView, rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
@@ -14,7 +14,7 @@ import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
 import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView, readMpcDetail } from './mpcRead.js';
-import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
+import { documentKinds } from './documentKinds.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
 import { defaultPositions, positionKey } from '../shared/positions.js';
@@ -104,9 +104,9 @@ const defaultPermissions = {
   hr: { employees:['read','create','update'],positions:['read','create','update','delete'],attendance:['read','create','update'],rosterEntries:['read','create','update'],assignments:['read'],equipment:['read'],camps:['read'],campStays:['read'],guests:['read'],maintenance:['read'],technicalReadiness:['read'],equipmentTransfers:['read','create','update'],travelExpenses:['read','create','update'],shiftOverrides:['read','create','update'],documents:['read','create'],mealMenus:['read'],mealFeedback:['read','update'],bedAssignments:['read'],payrollEntries:['read','create','update','delete'] },
 };
 const permissionPages=[...types,'documents',...viewPages.map(page=>page.key)];
-async function allowed(req, page, action) {
+async function allowed(req, page, action, db) {
   if (req.user.role === 'admin' && action !== 'read') return true;
-  const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role]);
+  const { rows } = await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(), req.user.role], db);
   const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},rows[0]?.permissions||{},[...types,'documents']);
   return Array.isArray(permissions[page]) && permissions[page].includes(action);
 }
@@ -442,7 +442,7 @@ app.put('/api/permissions/:role', auth, admin, async (req, res) => {
   if(role==='admin')permissions.permissions=['read'];
   await query('INSERT INTO public.role_permissions(project_id,role,permissions) VALUES($1,$2,$3::jsonb) ON CONFLICT(project_id,role) DO UPDATE SET permissions=$3::jsonb,updated_at=now()', [currentProject(), role, JSON.stringify(permissions)]);
   await audit(req, 'permissions', 'update', null, { role, permissions });
-  res.json({ role, permissions });
+  res.json({ role, permissions:permissionMatrix(role,defaultPermissions[role]||{},permissions,[...types,'documents']) });
 });
 app.get('/api/audit', auth, admin, async (req, res) => {
   const role = String(req.query.role || '');
@@ -477,6 +477,7 @@ app.post('/api/documents',auth,documentEditor,async (req,res)=>{
     const approvers=[];
     for(const id of ids){const person=await get('employees',id);if(!person)return res.status(400).json({error:'Батлах ажилтан энэ төсөлд байхгүй'});approvers.push({employeeId:person.id,position:person.position||'',name:`${person.lastName||''} ${person.firstName||''}`.trim()})}
     if(kind==='termination'&&!fields.legalBasis)return res.status(400).json({error:'Ажлаас чөлөөлөх тушаалын хуулийн үндэслэлийг оруулна уу'});
+    const {createEmployeePdf}=await import('./pdfDocuments.js');
     const pdf=await createEmployeePdf({kind,employee,fields:{...fields,projectName:(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0]?.name},approvers});
     const {rows}=await query('INSERT INTO public.documents(project_id,employee_id,kind,fields,approvers,pdf,created_by) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7) RETURNING id,created_at AS "createdAt"',[currentProject(),employee.id,kind,JSON.stringify(fields),JSON.stringify(approvers),pdf,req.user.id]);
     await audit(req,'documents','create',rows[0].id,{employeeId:employee.id,kind,fields,approvers});
@@ -593,7 +594,7 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   await ensureRoles();
   await ensurePositions();
   const [recordResult,submissionResult,userResult]=await Promise.all([
-    query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) AND project_id=$2 ORDER BY id DESC',[types,currentProject()]),
+    query('SELECT id,type,body,created_at,updated_at FROM public.records WHERE type=ANY($1::text[]) AND project_id=$2 ORDER BY id DESC',[types.filter(type=>type!=='rosterEntries'),currentProject()]),
     query(submissionSql,[currentProject()]),
     req.user.role==='admin'?query('SELECT id,username,name,role,camp_id AS "campId",project_id AS "projectId",employee_id AS "employeeId",active FROM public.users WHERE project_id=$1 OR role=$2 ORDER BY id',[currentProject(),'admin']):Promise.resolve({rows:[]})
   ]);
@@ -603,7 +604,18 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   const permissionRows = (await query('SELECT permissions FROM public.role_permissions WHERE project_id=$1 AND role=$2', [currentProject(),req.user.role])).rows;
   const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},permissionRows[0]?.permissions||{},[...types,'documents']);
   const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
+  if(permissions.rosterSketch?.includes('read')&&!permissions.employees?.includes('read'))records.employees=employees.map(rosterEmployeeView);
   res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,roles:await projectRoles(),projectId:currentProject()});
+});
+app.get('/api/roster-entries',auth,async(req,res)=>{
+  try{
+    if(!await allowed(req,'rosterEntries','read'))return res.status(403).json({error:'Ростер харах эрхгүй'});
+    const {startDate,endDate}=req.query;
+    const dates=rosterRangeDates(startDate,endDate);
+    if(dates.length>31)throw new Error('Ростерын мэдээллийг 31 хоногоор татна уу');
+    const result=await query("SELECT id,type,body,created_at,updated_at FROM public.records WHERE type='rosterEntries' AND project_id=$1 AND body->>'date'>=$2 AND body->>'date'<$3 ORDER BY id DESC",[currentProject(),startDate,endDate]);
+    res.json(result.rows.map(rowRecord));
+  }catch(error){res.status(400).json({error:error.message})}
 });
 app.post('/api/roster-entries/range',auth,async(req,res)=>{
   try {
@@ -617,7 +629,7 @@ app.post('/api/roster-entries/range',auth,async(req,res)=>{
       const existing=new Map((await all('rosterEntries',db)).filter(row=>Number(row.employeeId)===Number(employeeId)).map(row=>[row.date,row]));
       const creates=dates.some(date=>!existing.has(date));
       const updates=dates.some(date=>existing.has(date));
-      if(creates&&!await allowed(req,'rosterEntries','create')||updates&&!await allowed(req,'rosterEntries','update')){const error=new Error('Ростерын төлөв нэмэх эсвэл засах эрхгүй');error.status=403;throw error}
+      if(creates&&!await allowed(req,'rosterEntries','create',db)||updates&&!await allowed(req,'rosterEntries','update',db)){const error=new Error('Ростерын төлөв нэмэх эсвэл засах эрхгүй');error.status=403;throw error}
       const values=[];
       for(const date of dates){const value=await validate('rosterEntries',{date,employeeId:person.id,code,notes},db);if(!await canEditRecord(req,'rosterEntries',value,db)){const error=new Error('Энэ ажилтны ростер засах эрхгүй');error.status=403;throw error}values.push(value)}
       let created=0,updated=0;
@@ -627,6 +639,30 @@ app.post('/api/roster-entries/range',auth,async(req,res)=>{
         else{const row=await insert('rosterEntries',value,db);await audit(req,'rosterEntries','create',row.id,{date:value.date},db);created++}
       }
       return {count:dates.length,created,updated};
+    });
+    res.json(result);
+  }catch(error){res.status(error.status||400).json({error:error.message})}
+});
+app.post('/api/roster-entries/sequence',auth,async(req,res)=>{
+  try {
+    const {employeeIds,startDate,pattern,repeatCount=1,notes=''}=req.body||{};
+    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500||new Set(employeeIds.map(Number)).size!==employeeIds.length)throw new Error('1–500 ажилтан давхардуулахгүй сонгоно уу');
+    const days=buildRosterSequence(startDate,pattern,repeatCount);
+    if(employeeIds.length*days.length>100000)throw new Error('Нэг удаад 100,000 өдрөөс олон бүртгэл оруулахгүй. Ажилтнаа хэсэгчилнэ үү');
+    const result=await withTransaction(async db=>{
+      await query('SELECT id FROM public.projects WHERE id=$1 FOR UPDATE',[currentProject()],db);
+      const people=new Map((await all('employees',db)).map(row=>[Number(row.id),row]));
+      const ids=employeeIds.map(Number);
+      if(ids.some(id=>!Number.isSafeInteger(id)||!people.has(id)))throw new Error('Сонгосон ажилтан энэ төсөлд олдсонгүй');
+      const existing=new Map((await all('rosterEntries',db)).filter(row=>ids.includes(Number(row.employeeId))).map(row=>[`${row.employeeId}:${row.date}`,row]));
+      const records=ids.flatMap(employeeId=>days.map(({date,code})=>({date,code,employeeId,notes:String(notes).trim().slice(0,2000)})));
+      const updates=[],creates=[];
+      for(const value of records){const old=existing.get(`${value.employeeId}:${value.date}`);(old?updates:creates).push(old?{id:old.id,body:value}:value)}
+      if(creates.length&&!await allowed(req,'rosterEntries','create',db)||updates.length&&!await allowed(req,'rosterEntries','update',db)){const error=new Error('Ростерын төлөв нэмэх эсвэл засах эрхгүй');error.status=403;throw error}
+      for(let offset=0;offset<updates.length;offset+=2000)await query("UPDATE public.records AS record SET body=entry.body,updated_at=now() FROM jsonb_to_recordset($1::jsonb) AS entry(id bigint,body jsonb) WHERE record.id=entry.id AND record.type='rosterEntries' AND record.project_id=$2",[JSON.stringify(updates.slice(offset,offset+2000)),currentProject()],db);
+      for(let offset=0;offset<creates.length;offset+=2000)await query("INSERT INTO public.records(type,body,project_id) SELECT 'rosterEntries',entry.value,$2 FROM jsonb_array_elements($1::jsonb) AS entry(value)",[JSON.stringify(creates.slice(offset,offset+2000)),currentProject()],db);
+      await audit(req,'rosterEntries','sequence',null,{employeeIds:ids,startDate,pattern,repeatCount:Number(repeatCount),days:days.length,created:creates.length,updated:updates.length},db);
+      return {employeeCount:ids.length,days:days.length,count:records.length,created:creates.length,updated:updates.length};
     });
     res.json(result);
   }catch(error){res.status(error.status||400).json({error:error.message})}

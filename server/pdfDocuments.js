@@ -2,16 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { PDFDocument, rgb } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { documentKinds } from './documentKinds.js';
 
 const fontPath = fileURLToPath(new URL('./fonts/NotoSans-Regular.ttf', import.meta.url));
-const kinds = {
-  hiring:'Ажилд томилох тушаал',
-  termination:'Ажлаас чөлөөлөх тушаал',
-  clearance:'Тойрох хуудас',
-  extension:'Сунаж ажиллах хуудас',
-  certificate:'Ажилтны тодорхойлолт',
-};
-export const documentKinds = kinds;
+export { documentKinds };
 
 function wrap(text, font, size, width) {
   const result=[];
@@ -29,7 +23,7 @@ function wrap(text, font, size, width) {
 }
 
 export async function createEmployeePdf({kind,employee,fields={},approvers=[]}) {
-  if (!kinds[kind]) throw new Error('Баримтын төрөл буруу байна');
+  if (!documentKinds[kind]) throw new Error('Баримтын төрөл буруу байна');
   const pdf=await PDFDocument.create();
   pdf.registerFontkit(fontkit);
   const font=await pdf.embedFont(await readFile(fontPath),{subset:true});
