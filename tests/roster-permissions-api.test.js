@@ -78,6 +78,12 @@ test('custom role can save permissions and create, update, delete roster records
     const position=await request(cookie,'POST','/api/records/positions',{name:'Ростер тест байр'});
     await request(cookie,'PUT',`/api/records/positions/${position.id}`,{name:'Ростер тест байр шинэ'});
     await request(cookie,'DELETE',`/api/records/positions/${position.id}`);
+    const document=await request(adminCookie,'POST','/api/documents',{employeeId:first.id,kind:'hiring',fields:{date:'2026-10-23',orderNumber:'TEST-1',legalBasis:'Тестийн үндэслэл'}});
+    const word=await fetch(`${base}/api/documents/${document.id}/docx`,{headers:{Cookie:adminCookie}});
+    assert.equal(word.status,200);
+    assert.match(word.headers.get('content-type'),/wordprocessingml/);
+    assert.match(word.headers.get('content-disposition'),/\.docx/);
+    assert.equal(Buffer.from(await word.arrayBuffer()).subarray(0,2).toString(),'PK');
   }finally{
     child.kill();
     rmSync(cwd,{recursive:true,force:true});

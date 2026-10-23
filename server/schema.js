@@ -75,9 +75,11 @@ CREATE TABLE IF NOT EXISTS public.documents (
   fields jsonb NOT NULL DEFAULT '{}'::jsonb,
   approvers jsonb NOT NULL DEFAULT '[]'::jsonb,
   pdf bytea NOT NULL,
+  docx bytea,
   created_by integer NOT NULL REFERENCES public.users(id),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE public.documents ADD COLUMN IF NOT EXISTS docx bytea;
 CREATE INDEX IF NOT EXISTS documents_project_employee_idx ON public.documents(project_id,employee_id,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.sessions (

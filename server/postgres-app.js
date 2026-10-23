@@ -477,12 +477,19 @@ app.post('/api/documents',auth,documentEditor,async (req,res)=>{
     const approvers=[];
     for(const id of ids){const person=await get('employees',id);if(!person)return res.status(400).json({error:'Батлах ажилтан энэ төсөлд байхгүй'});approvers.push({employeeId:person.id,position:person.position||'',name:`${person.lastName||''} ${person.firstName||''}`.trim()})}
     if(kind==='termination'&&!fields.legalBasis)return res.status(400).json({error:'Ажлаас чөлөөлөх тушаалын хуулийн үндэслэлийг оруулна уу'});
-    const {createEmployeePdf}=await import('./pdfDocuments.js');
-    const pdf=await createEmployeePdf({kind,employee,fields:{...fields,projectName:(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0]?.name},approvers});
-    const {rows}=await query('INSERT INTO public.documents(project_id,employee_id,kind,fields,approvers,pdf,created_by) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7) RETURNING id,created_at AS "createdAt"',[currentProject(),employee.id,kind,JSON.stringify(fields),JSON.stringify(approvers),pdf,req.user.id]);
+    const {createEmployeeDocx}=await import('./wordDocuments.js');
+    const docx=await createEmployeeDocx({kind,employee,fields:{...fields,projectName:(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0]?.name},approvers});
+    const {rows}=await query('INSERT INTO public.documents(project_id,employee_id,kind,fields,approvers,pdf,docx,created_by) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8) RETURNING id,created_at AS "createdAt"',[currentProject(),employee.id,kind,JSON.stringify(fields),JSON.stringify(approvers),Buffer.alloc(0),docx,req.user.id]);
     await audit(req,'documents','create',rows[0].id,{employeeId:employee.id,kind,fields,approvers});
     res.json({id:rows[0].id,employeeId:employee.id,kind,fields,approvers,createdAt:rows[0].createdAt});
   }catch(error){res.status(400).json({error:error.message})}
+});
+app.get('/api/documents/:id/docx',auth,documentEditor,async(req,res)=>{
+  const row=(await query('SELECT employee_id,kind,fields,approvers,docx FROM public.documents WHERE id=$1 AND project_id=$2',[Number(req.params.id),currentProject()])).rows[0];
+  if(!row)return res.status(404).json({error:'Баримт олдсонгүй'});
+  let body=row.docx;
+  if(!body){const employee=await get('employees',row.employee_id);if(!employee)return res.status(404).json({error:'Ажилтны мэдээлэл олдсонгүй'});const {createEmployeeDocx}=await import('./wordDocuments.js');body=await createEmployeeDocx({kind:row.kind,employee,fields:row.fields,approvers:row.approvers})}
+  res.set({'Content-Type':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','Content-Disposition':`attachment; filename="hr-${row.kind}-${req.params.id}.docx"`,'Cache-Control':'private, no-store'}).send(body);
 });
 app.get('/api/documents/:id/pdf',auth,documentEditor,async(req,res)=>{
   const row=(await query('SELECT kind,pdf FROM public.documents WHERE id=$1 AND project_id=$2',[Number(req.params.id),currentProject()])).rows[0];
