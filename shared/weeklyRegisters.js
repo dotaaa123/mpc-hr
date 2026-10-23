@@ -7,6 +7,17 @@ export function validDay(value) {
     new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 }
 
+// The end date is exclusive: October 23 → October 30 covers seven days.
+export function rosterRangeDates(startDate, endDate) {
+  if (!validDay(startDate) || !validDay(endDate)) throw new Error('Ростерын огноо буруу байна');
+  const start = Date.parse(`${startDate}T00:00:00Z`);
+  const end = Date.parse(`${endDate}T00:00:00Z`);
+  const count = (end - start) / 86400000;
+  if (!Number.isInteger(count) || count < 1 || count > 366)
+    throw new Error('Дуусах өдөр эхлэх өдрөөс хойш, 366 хоногийн дотор байна');
+  return Array.from({ length: count }, (_, index) => new Date(start + index * 86400000).toISOString().slice(0, 10));
+}
+
 export function validateRosterEntry(value, getEmployee) {
   if (!validDay(value.date) || !getEmployee(value.employeeId) || !rosterCodes.includes(value.code))
     throw new Error('Ростерын өдөр, ажилтан эсвэл төлөв буруу байна');

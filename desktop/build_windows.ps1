@@ -1,6 +1,6 @@
 param(
   [string]$AppUrl = $env:MPC_HR_URL,
-  [string]$Version = "1.0.8"
+  [string]$Version = "1.0.9"
 )
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot

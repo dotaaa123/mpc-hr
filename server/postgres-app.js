@@ -6,7 +6,7 @@ import { parseAllData, applyAllDataEdits, checkAllDataRows } from './allData.js'
 import { buildPlanSchedule, assertAssignable } from './planSchedule.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
-import { validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
+import { rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
@@ -604,6 +604,32 @@ app.get('/api/bootstrap',auth,async(req,res)=>{
   const permissions = permissionMatrix(req.user.role,defaultPermissions[req.user.role]||{},permissionRows[0]?.permissions||{},[...types,'documents']);
   const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,grouped[type],employees):[]]));
   res.json({records,submissions:visibleSubmissions(submissionResult.rows,req.user,assignments,employees),users:userResult.rows,permissions,roles:await projectRoles(),projectId:currentProject()});
+});
+app.post('/api/roster-entries/range',auth,async(req,res)=>{
+  try {
+    const {employeeId,startDate,endDate,code,notes=''}=req.body||{};
+    const dates=rosterRangeDates(startDate,endDate);
+    const result=await withTransaction(async db=>{
+      // Serialize range writes for this project so concurrent requests cannot create duplicate days.
+      await query('SELECT id FROM public.projects WHERE id=$1 FOR UPDATE',[currentProject()],db);
+      const person=await get('employees',employeeId,db);
+      if(!person)throw new Error('Ажилтан олдсонгүй');
+      const existing=new Map((await all('rosterEntries',db)).filter(row=>Number(row.employeeId)===Number(employeeId)).map(row=>[row.date,row]));
+      const creates=dates.some(date=>!existing.has(date));
+      const updates=dates.some(date=>existing.has(date));
+      if(creates&&!await allowed(req,'rosterEntries','create')||updates&&!await allowed(req,'rosterEntries','update')){const error=new Error('Ростерын төлөв нэмэх эсвэл засах эрхгүй');error.status=403;throw error}
+      const values=[];
+      for(const date of dates){const value=await validate('rosterEntries',{date,employeeId:person.id,code,notes},db);if(!await canEditRecord(req,'rosterEntries',value,db)){const error=new Error('Энэ ажилтны ростер засах эрхгүй');error.status=403;throw error}values.push(value)}
+      let created=0,updated=0;
+      for(const value of values){
+        const old=existing.get(value.date);
+        if(old){await query('UPDATE public.records SET body=$1::jsonb,updated_at=now() WHERE type=$2 AND id=$3 AND project_id=$4',[JSON.stringify(value),'rosterEntries',old.id,currentProject()],db);await audit(req,'rosterEntries','update',old.id,{changes:changesBetween(old,value)},db);updated++}
+        else{const row=await insert('rosterEntries',value,db);await audit(req,'rosterEntries','create',row.id,{date:value.date},db);created++}
+      }
+      return {count:dates.length,created,updated};
+    });
+    res.json(result);
+  }catch(error){res.status(error.status||400).json({error:error.message})}
 });
 app.get('/api/records/:type',auth,async(req,res)=>{
   const type=req.params.type;

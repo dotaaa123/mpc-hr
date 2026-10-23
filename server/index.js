@@ -11,7 +11,7 @@ import { createEmployeePdf, documentKinds } from './pdfDocuments.js';
 import { importUndoPlan } from './importUndo.js';
 import { findDependentRecord } from './references.js';
 import { normalizeMaintenance } from '../shared/maintenance.js';
-import { validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
+import { rosterRangeDates, validateRosterEntry, validateTechnicalReadiness } from '../shared/weeklyRegisters.js';
 import { validateProduction, productionSourceKey } from './production.js';
 import { importBatchKey } from './importPreview.js';
 import { validateShiftHours } from '../shared/shiftHours.js';
@@ -457,6 +457,39 @@ app.get('/api/bootstrap',auth,(req,res)=>{
   const records=Object.fromEntries(types.map(type=>[type,req.user.role==='admin'||permissions[type]?.includes('read')?visibleRecords(type,req.user,type==='employees'?employees:type==='assignments'?assignments:all(type),employees):[]]));
   const users=req.user.role==='admin'?db.prepare('SELECT id,username,name,role,camp_id AS campId,project_id AS projectId,employee_id AS employeeId,active FROM users WHERE project_id=? OR role=? ORDER BY id').all(currentProject(),'admin'):[];
   res.json({records,submissions:submissionsForUser(req.user,assignments,employees),users,permissions,roles:projectRoles(),projectId:currentProject()});
+});
+app.post('/api/roster-entries/range',auth,(req,res)=>{
+  try {
+    const {employeeId,startDate,endDate,code,notes=''}=req.body||{};
+    const dates=rosterRangeDates(startDate,endDate);
+    const person=get('employees',employeeId);
+    if(!person)throw new Error('Ажилтан олдсонгүй');
+    const entries=all('rosterEntries').filter(row=>Number(row.employeeId)===Number(employeeId));
+    const existing=new Map(entries.map(row=>[row.date,row]));
+    const creates=dates.some(date=>!existing.has(date));
+    const updates=dates.some(date=>existing.has(date));
+    if(creates&&!allowed(req,'rosterEntries','create')||updates&&!allowed(req,'rosterEntries','update'))return res.status(403).json({error:'Ростерын төлөв нэмэх эсвэл засах эрхгүй'});
+    const values=dates.map(date=>validate('rosterEntries',{date,employeeId:person.id,code,notes}));
+    if(values.some(value=>!canEditRecord(req,'rosterEntries',value)))return res.status(403).json({error:'Энэ ажилтны ростер засах эрхгүй'});
+    db.exec('BEGIN');
+    try {
+      const stamp=new Date().toISOString();
+      let created=0,updated=0;
+      for(const value of values){
+        const old=existing.get(value.date);
+        if(old){
+          db.prepare('UPDATE records SET body=?,updated_at=? WHERE type=? AND id=? AND project_id=?').run(JSON.stringify(value),stamp,'rosterEntries',old.id,currentProject());
+          audit(req,'rosterEntries','update',old.id,{changes:changesBetween(old,value)});
+          updated++;
+        }else{
+          const result=db.prepare('INSERT INTO records(type,body,created_at,updated_at,project_id) VALUES(?,?,?,?,?)').run('rosterEntries',JSON.stringify(value),stamp,stamp,currentProject());
+          audit(req,'rosterEntries','create',result.lastInsertRowid,{date:value.date});
+          created++;
+        }
+      }
+      db.exec('COMMIT');res.json({count:dates.length,created,updated});
+    }catch(error){db.exec('ROLLBACK');throw error}
+  }catch(error){res.status(400).json({error:error.message})}
 });
 app.get('/api/records/:type',auth,(req,res)=>{
   const type=req.params.type;
