@@ -198,8 +198,7 @@ async function validate(type, body, db) {
   if (type === 'machineLogs' && (value.employeeId && !await get('employees', value.employeeId, db) || !await get('equipment', value.equipmentId, db))) throw new Error('Оператор эсвэл техник олдсонгүй');
   if (type === 'machineLogs' && !['day','night'].includes(value.workShift)) throw new Error('Өдөр/шөнийн ээлж сонгоно уу');
   if (type === 'machineLogs' && value.shiftGroup && !['A','B','C','D'].includes(value.shiftGroup)) throw new Error('A/B/C/D ээлж буруу байна');
-  if (type === 'machineLogs' && value.employeeId && !value.shiftGroup) throw new Error('Операторын A/B/C/D ээлжийг сонгоно уу');
-  if (type === 'machineLogs' && value.employeeId && (await get('employees',value.employeeId,db))?.shiftGroup !== value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
+  if (type === 'machineLogs' && value.employeeId && value.shiftGroup && (await get('employees',value.employeeId,db))?.shiftGroup !== value.shiftGroup) throw new Error('Операторын A/B/C/D ээлж ажилтны бүртгэлтэй таарахгүй байна');
   if (type === 'machineLogs' && (!Number.isFinite(Number(value.startHours)) || !Number.isFinite(Number(value.endHours)) || Number(value.endHours) < Number(value.startHours) || Number(value.startHours) < 0)) throw new Error('Төгсгөлийн мото цаг эхлэлээс бага байж болохгүй');
   if (type === 'machineLogs') value.workedMotorHours=Number((Number(value.endHours)-Number(value.startHours)).toFixed(2));
   if (type === 'machineLogs') validateShiftHours(value);
