@@ -127,7 +127,7 @@ function RecordForm({type,initial,lists,onSaved,onCancel,user}) {
   const selectedMaintenanceEquipment=Form.useWatch('equipmentId',form);
   const selectedStart=Form.useWatch('startDate',form);
   const selectedShift=Form.useWatch('shift',form);
-  const optionMap={camp:lists.camps.map(x=>({value:x.id,label:x.name})),warehouse:lists.warehouses.map(x=>({value:x.id,label:x.name})),employee:lists.employees.map(x=>({value:x.id,label:`${x.lastName} ${x.firstName} · ${x.code||x.register||'кодгүй'} · ${x.shiftGroup||'—'} ээлж`,shiftGroup:x.shiftGroup})),equipment:lists.equipment.map(x=>({value:x.id,label:`${x.parkNo} · ${x.model}`})),transfer:lists.equipmentTransfers.filter(x=>!selectedMaintenanceEquipment||[x.removedEquipmentId,x.installedEquipmentId].some(id=>Number(id)===Number(selectedMaintenanceEquipment))).map(x=>({value:x.id,label:`#${x.id} · ${x.partName} · ${lists.equipment.find(e=>e.id===Number(x.removedEquipmentId))?.parkNo||'—'} → ${lists.equipment.find(e=>e.id===Number(x.installedEquipmentId))?.parkNo||'—'}`})),plan:lists.plans.map(x=>({value:x.id,label:x.name})),parkHaul:lists.equipment.filter(x=>/дамп|автосамосвал|самосвал/i.test(`${x.kind} ${x.model}`)).map(x=>({value:String(x.parkNo),label:`${x.parkNo} · ${x.model}`})),parkExcavator:lists.equipment.filter(x=>/экскаватор|ачигч/i.test(`${x.kind} ${x.model}`)).map(x=>({value:String(x.parkNo),label:`${x.parkNo} · ${x.model}`})),guest:lists.guests.map(x=>({value:x.id,label:x.name}))};
+  const optionMap={camp:lists.camps.map(x=>({value:x.id,label:x.name})),warehouse:lists.warehouses.map(x=>({value:x.id,label:x.name})),employee:lists.employees.map(x=>({value:x.id,label:`${x.lastName} ${x.firstName} · ${x.code||x.register||'кодгүй'} · ${x.shiftGroup||'—'} ээлж`,shiftGroup:x.shiftGroup})),equipment:lists.equipment.map(x=>({value:x.id,label:type==='machineLogs'?x.parkNo:`${x.parkNo} · ${x.model}`})),transfer:lists.equipmentTransfers.filter(x=>!selectedMaintenanceEquipment||[x.removedEquipmentId,x.installedEquipmentId].some(id=>Number(id)===Number(selectedMaintenanceEquipment))).map(x=>({value:x.id,label:`#${x.id} · ${x.partName} · ${lists.equipment.find(e=>e.id===Number(x.removedEquipmentId))?.parkNo||'—'} → ${lists.equipment.find(e=>e.id===Number(x.installedEquipmentId))?.parkNo||'—'}`})),plan:lists.plans.map(x=>({value:x.id,label:x.name})),parkHaul:lists.equipment.filter(x=>/дамп|автосамосвал|самосвал/i.test(`${x.kind} ${x.model}`)).map(x=>({value:String(x.parkNo),label:`${x.parkNo} · ${x.model}`})),parkExcavator:lists.equipment.filter(x=>/экскаватор|ачигч/i.test(`${x.kind} ${x.model}`)).map(x=>({value:String(x.parkNo),label:`${x.parkNo} · ${x.model}`})),guest:lists.guests.map(x=>({value:x.id,label:x.name}))};
   const planDate=selectedStart?.format?.('YYYY-MM-DD') || today();
   const employeeOptions=lists.employees.map(person=>{const state=workState(person,planDate,lists.attendance,lists.shiftOverrides);return {value:person.id,label:`${person.lastName} ${person.firstName} · ${person.shiftGroup || '—'} ээлж · ${state.label}`,disabled:!state.available||state.shift&&state.shift!==(selectedShift||'day')}});
   const equipmentOptions=lists.equipment.filter(machine=>Number(machine.warehouseId)===Number(selectedWarehouse)&&machine.status==='ready'&&machine.availability==='available').map(machine=>({value:machine.id,label:`${machine.parkNo} · ${machine.kind} · ${machine.model}`}));
@@ -162,6 +162,32 @@ function ImportButton({type,onDone,user,equipment=[],employees=[]}) {
     const localIssues=[];
     const prepared=rows.map(row=>{
       const value={...row};
+      if(type==='machineLogs'){
+        const equipmentRef=String(value.equipmentId??'').trim();
+        if(equipmentRef){
+          const normalizedPark=normalizePark(equipmentRef);
+          const machine=equipment.find(item=>normalizePark(item.parkNo)===normalizedPark)||equipment.find(item=>Number(item.id)===Number(equipmentRef));
+          if(machine)value.equipmentId=machine.id;
+          else localIssues.push({row:value.__excelRow,message:`${equipmentRef} парк дугаартай техник энэ төсөлд бүртгэлгүй байна`});
+        }
+        const shift=String(value.workShift??'').trim().toLocaleLowerCase('mn-MN');
+        if(['өдөр','өдрийн','day'].includes(shift))value.workShift='day';
+        else if(['шөнө','шөнийн','night'].includes(shift))value.workShift='night';
+        const operatorRef=String(value.employeeId??'').trim();
+        if(operatorRef){
+          const normalizedName=operatorRef.toLocaleLowerCase('mn-MN').replace(/[\s.]+/g,'');
+          const exactId=employees.find(employee=>Number(employee.id)===Number(operatorRef));
+          const exactCode=employees.find(employee=>String(employee.code||'').trim().toLocaleLowerCase('mn-MN')===operatorRef.toLocaleLowerCase('mn-MN'));
+          const nameMatches=employees.filter(employee=>{
+            const compact=text=>String(text||'').toLocaleLowerCase('mn-MN').replace(/[\s.]+/g,'');
+            const variants=[employee.firstName,employee.lastName,`${employee.lastName||''}${employee.firstName||''}`,`${employee.lastName?.[0]||''}${employee.firstName||''}`];
+            return variants.some(name=>compact(name)===normalizedName);
+          });
+          const person=exactId||exactCode||(nameMatches.length===1?nameMatches[0]:null);
+          if(person){value.employeeId=person.id;value.shiftGroup||=person.shiftGroup}
+          else localIssues.push({row:value.__excelRow,message:`${operatorRef} оператор ажилтны бүртгэлд олдсонгүй`});
+        }
+      }
       if(type==='productionEntries'){
         delete value.operatorId;
         const code=String(value.operatorCode||'').trim();
