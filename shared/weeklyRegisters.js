@@ -2,7 +2,7 @@ export const rosterCodes = ['d', 'n', 'rr', 'in', 'out', 'adl', 'tr', 'si', 'pl'
 export const readinessStatuses = ['Ажиллаж байгаа', 'Ажилд бэлэн', 'Засвартай', 'Сэлбэг хүлээлттэй', 'Операторгүй', 'Зогссон'];
 
 export const rosterEmployeeView = employee => Object.fromEntries(
-  ['id','code','lastName','firstName','position','shiftGroup','rotationPattern','shiftStart','initialDayNight','hireDate','terminationDate','status']
+  ['id','code','lastName','firstName','branch','position','shiftGroup','rotationPattern','shiftStart','initialDayNight','hireDate','terminationDate','status']
     .map(key=>[key,employee[key]]).filter(([,value])=>value!==undefined)
 );
 

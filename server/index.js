@@ -507,11 +507,11 @@ app.post('/api/roster-entries/range',auth,(req,res)=>{
 app.post('/api/roster-entries/sequence',auth,(req,res)=>{
   try {
     const {employeeIds,startDate,pattern,repeatCount=1,notes=''}=req.body||{};
-    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500||new Set(employeeIds.map(Number)).size!==employeeIds.length)throw new Error('1–500 ажилтан давхардуулахгүй сонгоно уу');
+    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500)throw new Error('1–500 ажилтан сонгоно уу');
     const days=buildRosterSequence(startDate,pattern,repeatCount);
     if(employeeIds.length*days.length>100000)throw new Error('Нэг удаад 100,000 өдрөөс олон бүртгэл оруулахгүй. Ажилтнаа хэсэгчилнэ үү');
     const people=new Map(all('employees').map(row=>[Number(row.id),row]));
-    const ids=employeeIds.map(Number);
+    const ids=[...new Set(employeeIds.map(Number))];
     if(ids.some(id=>!Number.isSafeInteger(id)||!people.has(id)))throw new Error('Сонгосон ажилтан энэ төсөлд олдсонгүй');
     const existing=new Map(all('rosterEntries').filter(row=>ids.includes(Number(row.employeeId))).map(row=>[`${row.employeeId}:${row.date}`,row]));
     const values=ids.flatMap(employeeId=>days.map(({date,code})=>({date,code,employeeId,notes:String(notes).trim().slice(0,2000)})));

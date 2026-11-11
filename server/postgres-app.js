@@ -652,13 +652,13 @@ app.post('/api/roster-entries/range',auth,async(req,res)=>{
 app.post('/api/roster-entries/sequence',auth,async(req,res)=>{
   try {
     const {employeeIds,startDate,pattern,repeatCount=1,notes=''}=req.body||{};
-    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500||new Set(employeeIds.map(Number)).size!==employeeIds.length)throw new Error('1–500 ажилтан давхардуулахгүй сонгоно уу');
+    if(!Array.isArray(employeeIds)||!employeeIds.length||employeeIds.length>500)throw new Error('1–500 ажилтан сонгоно уу');
     const days=buildRosterSequence(startDate,pattern,repeatCount);
     if(employeeIds.length*days.length>100000)throw new Error('Нэг удаад 100,000 өдрөөс олон бүртгэл оруулахгүй. Ажилтнаа хэсэгчилнэ үү');
     const result=await withTransaction(async db=>{
       await query('SELECT id FROM public.projects WHERE id=$1 FOR UPDATE',[currentProject()],db);
       const people=new Map((await all('employees',db)).map(row=>[Number(row.id),row]));
-      const ids=employeeIds.map(Number);
+      const ids=[...new Set(employeeIds.map(Number))];
       if(ids.some(id=>!Number.isSafeInteger(id)||!people.has(id)))throw new Error('Сонгосон ажилтан энэ төсөлд олдсонгүй');
       const existing=new Map((await all('rosterEntries',db)).filter(row=>ids.includes(Number(row.employeeId))).map(row=>[`${row.employeeId}:${row.date}`,row]));
       const records=ids.flatMap(employeeId=>days.map(({date,code})=>({date,code,employeeId,notes:String(notes).trim().slice(0,2000)})));
