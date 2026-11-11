@@ -13,7 +13,7 @@ import { validateShiftHours } from '../shared/shiftHours.js';
 import { validateFuelEntry } from '../shared/fuelEntry.js';
 import { mergeEquipmentSource, normalizeVin, normalizePark } from '../shared/equipmentIdentity.js';
 import { viewPages, permissionMatrix } from '../shared/pageAccess.js';
-import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView, readMpcDetail } from './mpcRead.js';
+import { mpcViews, mpcPageKeys, sealCredentials, openCredentials, readMpcView, readMpcDetail, chatWithMpcHr } from './mpcRead.js';
 import { documentKinds } from './documentKinds.js';
 import { importUndoPlan } from './importUndo.js';
 import { roles, types, required, permitted } from './domain.js';
@@ -152,6 +152,38 @@ app.get('/api/mpc-read/:view/:id',async(req,res)=>{
   const row=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
   if(!row)return res.status(503).json({error:'MPC API холболт тохируулаагүй'});
   try{const project=(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0];res.set('Cache-Control','no-store');res.json(await readMpcDetail(req.params.view,req.params.id,openCredentials(row.credential_ciphertext),project?.name))}catch(error){res.status(502).json({error:error.message})}
+});
+app.post('/api/ai/chat',async(req,res)=>{
+  if(!['admin','hr'].includes(req.user.role))return res.status(403).json({error:'HR AI туслахад HR эсвэл админ эрх шаардлагатай'});
+  const question=String(req.body?.question||'').trim();
+  const history=Array.isArray(req.body?.history)?req.body.history.filter(item=>['user','assistant'].includes(item?.role)&&typeof item.content==='string').slice(-8).map(item=>({role:item.role,content:item.content.slice(0,1500)})):[];
+  if(!question||question.length>1000)return res.status(400).json({error:'Асуултаа 1,000 тэмдэгтээс хэтрүүлэхгүй оруулна уу'});
+  const stored=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
+  if(!stored)return res.status(503).json({error:'Энэ төсөлд MPC API холболт тохируулаагүй байна. Админаас холболтоо шалгуулна уу.'});
+  const [employees,attendance,rosters,project]=await Promise.all([all('employees'),all('attendance'),all('rosterEntries'),query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])]);
+  const dateMatches=[...question.matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)].map(match=>match[1]).sort();
+  const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Ulaanbaatar'}).format(new Date());
+  const endDate=dateMatches.at(-1)||today;
+  const daysBack=question.toLocaleLowerCase('mn-MN').includes('энэ сар')?Number(today.slice(8,10))-1:question.toLocaleLowerCase('mn-MN').includes('сүүлийн 30')?29:question.toLocaleLowerCase('mn-MN').includes('энэ долоо хоног')?6:13;
+  const startDate=dateMatches[0]||new Date(Date.parse(`${endDate}T00:00:00Z`)-daysBack*86400000).toISOString().slice(0,10);
+  const start=Date.parse(`${startDate}T00:00:00Z`),end=Date.parse(`${endDate}T00:00:00Z`);
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start>end||end-start>90*86400000)return res.status(400).json({error:'Тайлангийн хугацааг YYYY-MM-DD хэлбэрээр, 90 хоногоос хэтрүүлэхгүй оруулна уу'});
+  const inRange=date=>date>=startDate&&date<=endDate;
+  const currentEmployees=employees.filter(row=>row.status!=='inactive'&&(!row.terminationDate||row.terminationDate>endDate));
+  const by=(rows,key)=>Object.entries(rows.reduce((counts,row)=>{const value=String(row[key]||'Тодорхойгүй');counts[value]=(counts[value]||0)+1;return counts},{})).sort((a,b)=>b[1]-a[1]).slice(0,30).map(([name,count])=>`${name}: ${count}`).join('; ')||'Бүртгэл алга';
+  const periods=attendance.filter(row=>inRange(String(row.date||'')));
+  const rosterPeriod=rosters.filter(row=>inRange(String(row.date||'')));
+  const byDate=rows=>Object.entries(rows.reduce((groups,row)=>{const date=String(row.date||'Огноогүй');(groups[date]||= []).push(row);return groups},{})).sort(([a],[b])=>a.localeCompare(b)).map(([date,items])=>`${date}: ${by(items,'status')}`).join('\n');
+  const contexts=[`Төсөл: ${project.rows[0]?.name||'Сонгосон төсөл'}. Хамрах хугацаа: ${startDate}–${endDate}. Идэвхтэй ажилтан: ${currentEmployees.length}. Хэлтэс/салбарын тоо: ${by(currentEmployees,'branch')}. Албан тушаалын тоо: ${by(currentEmployees,'position')}. Ээлжийн бүлгийн тоо: ${by(currentEmployees,'shiftGroup')}.`,
+    `Ирцийн бүртгэл (${startDate}–${endDate}): нийт ${periods.length}. Төлөвөөр: ${by(periods,'status')}. Өдрөөр:\n${byDate(periods)}`,
+    `Ростерын бүртгэл (${startDate}–${endDate}): нийт ${rosterPeriod.length}. Төлөвөөр: ${by(rosterPeriod,'code')}. Өдрөөр:\n${byDate(rosterPeriod.map(row=>({...row,status:row.code})))}`];
+  const tokens=question.toLocaleLowerCase('mn-MN').split(/[^\p{L}\p{N}]+/u).filter(word=>word.length>=3);
+  const matches=employees.filter(row=>tokens.some(token=>`${row.lastName||''} ${row.firstName||''}`.toLocaleLowerCase('mn-MN').includes(token))).slice(0,8);
+  if(matches.length)contexts.push(`Асуултад нэрээр нь таарсан ажилтны ерөнхий мэдээлэл (регистр, холбоо барих, данс зэрэг талбар оруулаагүй): ${matches.map(row=>`${row.lastName||''} ${row.firstName||''}: салбар ${row.branch||'—'}, албан тушаал ${row.position||'—'}, ээлж ${row.shiftGroup||'—'}, төлөв ${row.status||'хэвийн'}`).join('; ')}.`);
+  const rangeAttendance=periods.filter(row=>matches.some(person=>Number(person.id)===Number(row.employeeId)));
+  const rangeRoster=rosterPeriod.filter(row=>matches.some(person=>Number(person.id)===Number(row.employeeId)));
+  if(matches.length){contexts.push(`Нэрээр таарсан ажилтнуудын ирц (${startDate}–${endDate}): ${rangeAttendance.map(row=>`${row.date} ${row.status}`).slice(0,60).join('; ')||'Бүртгэл алга'}.`);contexts.push(`Нэрээр таарсан ажилтнуудын ростер (${startDate}–${endDate}): ${rangeRoster.map(row=>`${row.date} ${row.code}`).slice(0,60).join('; ')||'Бүртгэл алга'}.`)}
+  try{const answer=await chatWithMpcHr(question,history,contexts.map(item=>item.slice(0,3000)),openCredentials(stored.credential_ciphertext));res.set('Cache-Control','no-store');res.json({answer})}catch(error){res.status(502).json({error:error.message||'HR AI холболт амжилтгүй'})}
 });
 app.get('/api/readiness-operators',async(req,res)=>{
   if(!await allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});

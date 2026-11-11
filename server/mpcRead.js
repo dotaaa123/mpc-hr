@@ -104,3 +104,26 @@ export async function readMpcDetail(view, id, credentials, projectName) {
   if(!response.ok)throw new Error(`MPC дэлгэрэнгүй мэдээлэл олдсонгүй (${response.status})`);
   return response.json();
 }
+
+export async function chatWithMpcHr(question, history, context, credentials) {
+  const base=(process.env.MPC_API_BASE_URL||'https://selbeg-api.vercel.app/api').replace(/\/$/,'');
+  const cacheKey=createHash('sha256').update(JSON.stringify([base,credentials])).digest('hex');
+  let cached=tokenCache.get(cacheKey);
+  if(!cached||cached.expiresAt<=Date.now()){
+    const login=await fetch(`${base}/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials),signal:AbortSignal.timeout(20000)});
+    if(!login.ok)throw new Error('MPC API-д нэвтрэх нэр эсвэл нууц үг буруу байна');
+    cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
+  }
+  let response=await fetch(`${base}/ai/hr-chat`,{method:'POST',headers:{authorization:`Bearer ${cached.value}`,'content-type':'application/json'},body:JSON.stringify({question,history,context}),signal:AbortSignal.timeout(80000)});
+  if(response.status===401){
+    tokenCache.delete(cacheKey);
+    const login=await fetch(`${base}/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials),signal:AbortSignal.timeout(20000)});
+    if(!login.ok)throw new Error('MPC API-д нэвтрэх боломжгүй');
+    cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
+    response=await fetch(`${base}/ai/hr-chat`,{method:'POST',headers:{authorization:`Bearer ${cached.value}`,'content-type':'application/json'},body:JSON.stringify({question,history,context}),signal:AbortSignal.timeout(80000)});
+  }
+  const result=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(result.error||`MPC AI хариу өгсөнгүй (${response.status})`);
+  if(typeof result.answer!=='string'||!result.answer.trim())throw new Error('MPC AI хоосон хариу ирүүллээ');
+  return result.answer.trim();
+}
