@@ -32,7 +32,19 @@ export function openCredentials(value) {
   return JSON.parse(Buffer.concat([decipher.update(encrypted),decipher.final()]).toString('utf8'));
 }
 
-export async function readMpcView(view, credentials) {
+const normalizeProjectName=value=>String(value||'').trim().toLocaleLowerCase('mn-MN').replace(/[\s\-_.]/g,'');
+
+async function findMpcProject(projectName,get){
+  const projectsResponse=await get('/projects');
+  if(!projectsResponse.ok)throw new Error(`MPC төслийн жагсаалт татаж чадсангүй (${projectsResponse.status})`);
+  const projectResult=await projectsResponse.json();
+  const projects=Array.isArray(projectResult)?projectResult:Array.isArray(projectResult.rows)?projectResult.rows:[];
+  const project=projects.find(row=>normalizeProjectName(row.name)===normalizeProjectName(projectName));
+  if(!project)throw new Error(`MPC дээр “${projectName}” нэртэй төсөл олдсонгүй`);
+  return project;
+}
+
+export async function readMpcView(view, credentials, projectName) {
   const config=mpcViews[view];
   if(!config)throw new Error('MPC хуудас олдсонгүй');
   const base=(process.env.MPC_API_BASE_URL||'https://selbeg-api.vercel.app/api').replace(/\/$/,'');
@@ -52,12 +64,14 @@ export async function readMpcView(view, credentials) {
     if(response.status===401){value=await token(true);response=await fetch(`${base}${path}`,{headers:{authorization:`Bearer ${value}`},signal:AbortSignal.timeout(60000)})}
     return response;
   }
-  const response=await get(config.path);
+  const project=await findMpcProject(projectName,get);
+  const withProject=path=>`${path}${path.includes('?')?'&':'?'}projectId=${encodeURIComponent(project.id)}`;
+  const response=await get(withProject(config.path));
   if(!response.ok)throw new Error(`MPC API мэдээлэл буцаасангүй (${response.status})`);
   const result=await response.json();
   let rows=Array.isArray(result)?result:Array.isArray(result.rows)?result.rows:[];
   if(view==='transfers'){
-    const receipts=await get('/receipts?source=internal');
+    const receipts=await get(withProject('/receipts?source=internal'));
     if(!receipts.ok)throw new Error(`MPC API дотоод орлого буцаасангүй (${receipts.status})`);
     const inward=await receipts.json();
     rows=[...rows.filter(row=>row.type==='transfer').map(row=>({...row,mirrorKey:`out-${row.id}`,direction:'Гаргалт'})),...inward.map(row=>({...row,mirrorKey:`in-${row.id}`,direction:'Хүлээн авалт'}))].sort((a,b)=>String(b.docDate).localeCompare(String(a.docDate)));
@@ -65,7 +79,7 @@ export async function readMpcView(view, credentials) {
   return { title:config.title, columns:config.columns, rows, total:view==='transfers'?rows.length:result.total??rows.length, fetchedAt:new Date().toISOString() };
 }
 
-export async function readMpcDetail(view, id, credentials) {
+export async function readMpcDetail(view, id, credentials, projectName) {
   const config=mpcViews[view];
   if(!config || !/^[\w-]+$/.test(String(id)))throw new Error('MPC бичлэг олдсонгүй');
   const base=(process.env.MPC_API_BASE_URL||'https://selbeg-api.vercel.app/api').replace(/\/$/,'');
@@ -77,12 +91,15 @@ export async function readMpcDetail(view, id, credentials) {
     cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
   }
   const path=config.path.split('?')[0];
-  let response=await fetch(`${base}${path}/${encodeURIComponent(id)}`,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
+  const get=async path=>fetch(`${base}${path}`,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
+  const project=await findMpcProject(projectName,get);
+  const detailUrl=`${base}${path}/${encodeURIComponent(id)}?projectId=${encodeURIComponent(project.id)}`;
+  let response=await fetch(detailUrl,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
   if(response.status===401){
     const login=await fetch(`${base}/auth/login`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(credentials),signal:AbortSignal.timeout(20000)});
     if(!login.ok)throw new Error('MPC API-д нэвтрэх боломжгүй');
     cached={value:(await login.json()).token,expiresAt:Date.now()+100*60*1000};tokenCache.set(cacheKey,cached);
-    response=await fetch(`${base}${path}/${encodeURIComponent(id)}`,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
+    response=await fetch(detailUrl,{headers:{authorization:`Bearer ${cached.value}`},signal:AbortSignal.timeout(30000)});
   }
   if(!response.ok)throw new Error(`MPC дэлгэрэнгүй мэдээлэл олдсонгүй (${response.status})`);
   return response.json();

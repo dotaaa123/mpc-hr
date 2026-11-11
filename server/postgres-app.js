@@ -143,7 +143,7 @@ app.get('/api/mpc-read/:view',async(req,res)=>{
   if(!page||!await allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
   const row=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
   if(!row)return res.status(503).json({error:'MPC API холболтыг админ тохиргоонд бүртгэнэ үү'});
-  try{const data=await readMpcView(req.params.view,openCredentials(row.credential_ciphertext));res.set('Cache-Control','no-store');res.json(data)}
+  try{const project=(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0];const data=await readMpcView(req.params.view,openCredentials(row.credential_ciphertext),project?.name);res.set('Cache-Control','no-store');res.json(data)}
   catch(error){res.status(502).json({error:error.message})}
 });
 app.get('/api/mpc-read/:view/:id',async(req,res)=>{
@@ -151,7 +151,7 @@ app.get('/api/mpc-read/:view/:id',async(req,res)=>{
   if(!page||!await allowed(req,page,'read'))return res.status(403).json({error:'Харах эрхгүй'});
   const row=(await query('SELECT credential_ciphertext FROM public.mpc_integrations WHERE project_id=$1',[currentProject()])).rows[0];
   if(!row)return res.status(503).json({error:'MPC API холболт тохируулаагүй'});
-  try{res.set('Cache-Control','no-store');res.json(await readMpcDetail(req.params.view,req.params.id,openCredentials(row.credential_ciphertext)))}catch(error){res.status(502).json({error:error.message})}
+  try{const project=(await query('SELECT name FROM public.projects WHERE id=$1',[currentProject()])).rows[0];res.set('Cache-Control','no-store');res.json(await readMpcDetail(req.params.view,req.params.id,openCredentials(row.credential_ciphertext),project?.name))}catch(error){res.status(502).json({error:error.message})}
 });
 app.get('/api/readiness-operators',async(req,res)=>{
   if(!await allowed(req,'technicalReadiness','read'))return res.status(403).json({error:'Харах эрхгүй'});
@@ -164,7 +164,7 @@ async function validate(type, body, db) {
   if (missing.length) throw new Error(`Заавал бөглөх талбар: ${missing.join(', ')}`);
   if(type==='positions'&&(value.name.length<2||value.name.length>100))throw new Error('Албан тушаалын нэр 2–100 тэмдэгт байна');
   if(type==='fuel')validateFuelEntry(value,value.equipmentId?await get('equipment',value.equipmentId,db):null);
-  if (type === 'employees' && !/^\S{2,}$/.test(String(value.register))) throw new Error('Регистрийн дугаар буруу байна');
+  if (type === 'employees' && (!/^\S{2,}$/.test(String(value.register))||['-','—','–','n/a','na','байхгүй'].includes(String(value.register).trim().toLocaleLowerCase('mn-MN')))) throw new Error('Регистрийн дугаар буруу байна');
   if(type==='employees'&&(['baseSalary','socialSalary','payrollPlannedDays'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||value.insuredShare!==undefined&&(!Number.isFinite(Number(value.insuredShare))||Number(value.insuredShare)<0||Number(value.insuredShare)>1)))throw new Error('Ажилтны цалин, зохих хоног эсвэл НДШ тооцох хувь буруу байна');
   if(type==='payrollEntries') {if(!await get('employees',value.employeeId,db)||!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(value.month))||!['first','second'].includes(value.half))throw new Error('Цалингийн ажилтан эсвэл хугацаа буруу байна');if(['plannedHours','workedHours','travelDays','baseSalary','extraPay','otherDeduction'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0))||['insuredShare','insuranceRate','taxRate'].some(key=>value[key]!==undefined&&(!Number.isFinite(Number(value[key]))||Number(value[key])<0||Number(value[key])>1)))throw new Error('Цалингийн тоо эсвэл хувь буруу байна');if(value.skipPayroll!==undefined&&typeof value.skipPayroll!=='boolean'||value.skipPayroll&&!['rest','terminated','discipline','other','unknown'].includes(value.skipReason))throw new Error('Цалин бодохгүй шалтгааныг сонгоно уу')}
   const employeeForRoster=type==='rosterEntries'?await get('employees',value.employeeId,db):null;
